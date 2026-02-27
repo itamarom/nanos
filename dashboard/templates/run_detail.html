@@ -1,0 +1,683 @@
+{% extends "base.html" %}
+{% block title %}Run {{ run.id|string|truncate(8, True, '') if run else 'Not Found' }} - Nanos Dashboard{% endblock %}
+{% block content %}
+{% if run %}
+<div class="page-header">
+    <h1>Run <code>{{ run.id|string|truncate(8, True, '') }}</code></h1>
+    {% if run.status in ('running', 'awaiting_approval') %}
+    <form method="post" action="/runs/{{ run.id }}/stop" style="display:inline;">
+        <button type="submit" class="btn btn-danger btn-sm" id="stop-btn">Stop</button>
+    </form>
+    {% else %}
+    <form method="post" action="/nanos/{{ run.nano.name }}/run" style="display:inline;">
+        <button type="submit" class="btn btn-success btn-sm">Rerun</button>
+    </form>
+    {% endif %}
+    <p><a href="/nanos/{{ run.nano.name }}">{{ run.nano.name }}</a></p>
+</div>
+
+<div class="card mb-2">
+    <div class="card-header">Details</div>
+    <dl>
+        <dt>Status</dt>
+        <dd>
+            {% if run.status == 'success' %}
+            <span id="run-status" class="badge badge-success">success</span>
+            {% elif run.status == 'error' %}
+            <span id="run-status" class="badge badge-error">error</span>
+            {% elif run.status == 'awaiting_approval' %}
+            <span id="run-status" class="badge badge-warning">awaiting approval</span>
+            {% else %}
+            <span id="run-status" class="badge badge-running">running</span>
+            {% endif %}
+            {% if run.draft_mode %}
+            <span class="badge badge-draft" style="background:#6b7280;color:#fff;margin-left:0.5rem">Draft Mode</span>
+            {% endif %}
+        </dd>
+        <dt>Trigger</dt>
+        <dd>{{ run.trigger }}</dd>
+        <dt>Started</dt>
+        <dd>{{ run.started_at.strftime('%Y-%m-%d %H:%M:%S') }}</dd>
+        <dt>Finished</dt>
+        <dd id="run-finished">{{ run.finished_at.strftime('%Y-%m-%d %H:%M:%S') if run.finished_at else '-' }}</dd>
+        <dt>Exit Code</dt>
+        <dd id="run-exit-code">{{ run.exit_code if run.exit_code is not none else '-' }}</dd>
+    </dl>
+</div>
+
+<div id="pipeline-container" style="display:none;">
+    <h2>Pipeline</h2>
+    <div id="pipeline-scroll">
+        <svg id="pipeline-svg"></svg>
+    </div>
+</div>
+
+<dialog id="stage-modal">
+    <div class="modal-content" style="max-width:640px;">
+        <div class="modal-header">
+            <strong id="stage-modal-title"></strong>
+            <button class="modal-close" id="stage-modal-close">&times;</button>
+        </div>
+        <div class="modal-body">
+            <pre id="stage-modal-body" style="max-height:60vh; overflow-y:auto; white-space:pre-wrap; word-break:break-word; font-size:0.85rem;"></pre>
+        </div>
+    </div>
+</dialog>
+
+<div id="approvals-section" {% if not approvals %}style="display:none"{% endif %}>
+    <div style="display:flex;align-items:center;gap:0.75rem">
+        <h2 style="margin:0">Approvals</h2>
+        <button type="button" class="btn btn-secondary btn-sm" id="expand-all-approvals" style="display:none">Expand All</button>
+    </div>
+    <div id="approvals-list">
+        {% for a in approvals %}
+        <div class="approval-card{% if a.status == 'draft' %} approval-draft{% endif %}" data-id="{{ a.id }}">
+            <div class="approval-info">
+                <strong>{{ a.endpoint }}</strong>
+                <span class="approval-badge">
+                {% if a.status == 'draft' %}
+                <span class="badge badge-neutral" style="background:#6b7280;color:#fff">draft — not executed</span>
+                {% elif a.status == 'pending' %}
+                <span class="badge badge-warning">pending</span>
+                {% elif a.status in ('approved', 'executed') %}
+                <span class="badge badge-success">{{ a.status }}</span>
+                {% elif a.status == 'rejected' %}
+                <span class="badge badge-error">rejected</span>
+                {% elif a.status == 'failed' %}
+                <span class="badge badge-error">failed</span>
+                {% else %}
+                <span class="badge badge-neutral">{{ a.status }}</span>
+                {% endif %}
+                </span>
+                {% if a.explanation %}<p style="margin:0.25rem 0 0;font-size:0.9rem;white-space:pre-line"><strong>What:</strong> {{ a.explanation }}</p>{% endif %}
+                {% if a.reasoning %}<p style="margin:0.15rem 0 0;font-size:0.9rem;white-space:pre-line"><strong>Why:</strong> {{ a.reasoning }}</p>{% endif %}
+                {% if a.request_body %}
+                <details class="approval-params">
+                    <summary>Request params</summary>
+                    <pre><code>{{ a.request_body | tojson_pretty }}</code></pre>
+                </details>
+                {% endif %}
+            </div>
+            {% if a.status == 'pending' %}
+            <div class="approval-actions">
+                <button class="btn-approve" onclick="resolveApproval('{{ a.id }}', 'approve')">Approve</button>
+                <button class="btn-reject" onclick="resolveApproval('{{ a.id }}', 'reject')">Reject</button>
+            </div>
+            {% endif %}
+        </div>
+        {% endfor %}
+    </div>
+</div>
+
+<h2>Log Output</h2>
+<div id="log-api-container" class="log-api-wrapper"></div>
+<p id="log-empty" {% if log_content or run.stdout or run.stderr or run.status == 'running' %}style="display:none"{% endif %}>No log output available.</p>
+
+<dialog id="api-call-modal" class="modal-wide">
+    <div class="modal-content">
+        <div class="modal-header">
+            <strong id="api-call-modal-title"></strong>
+            <button class="modal-close" id="api-call-modal-close">&times;</button>
+        </div>
+        <div class="modal-body" id="api-call-modal-body"></div>
+    </div>
+</dialog>
+
+{% if state_before or state_after %}
+<h2>State</h2>
+<div class="detail-grid">
+    <div class="card">
+        <div class="card-header">Before</div>
+        {% if state_before %}
+        <table class="state-table">
+            <thead><tr><th>Key</th><th>Type</th><th>Value</th></tr></thead>
+            <tbody>
+            {% for key, entry in state_before.items() %}
+            <tr{% if state_after and (key not in state_after or state_after[key].value != entry.value) %} class="state-changed"{% endif %}>
+                <td><code>{{ key }}</code></td>
+                <td>{{ entry.type }}</td>
+                <td><code>{{ entry.value }}</code></td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+        <p style="padding:0.75rem;color:var(--text-secondary)">No state</p>
+        {% endif %}
+    </div>
+    <div class="card">
+        <div class="card-header">After</div>
+        {% if state_after %}
+        <table class="state-table">
+            <thead><tr><th>Key</th><th>Type</th><th>Value</th></tr></thead>
+            <tbody>
+            {% for key, entry in state_after.items() %}
+            <tr{% if not state_before or key not in state_before or state_before[key].value != entry.value %} class="state-changed"{% endif %}>
+                <td><code>{{ key }}</code></td>
+                <td>{{ entry.type }}</td>
+                <td><code>{{ entry.value }}</code></td>
+            </tr>
+            {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+        <p style="padding:0.75rem;color:var(--text-secondary)">No state</p>
+        {% endif %}
+    </div>
+</div>
+{% endif %}
+
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script>
+(function() {
+    const COLORS = {
+        pending:  { bg: '#9ca3af', text: '#fff' },
+        running:  { bg: '#3b82f6', text: '#fff' },
+        waiting:  { bg: '#d97706', text: '#fff' },
+        done:     { bg: '#16a34a', text: '#fff' },
+        error:    { bg: '#dc2626', text: '#fff' },
+    };
+    const NODE_W = 160, NODE_H = 62, GAP = 40, ARROW = 12, PAD = 20;
+    const PROGRESS_H = 5, STATUS_GAP = 16;
+
+    const container = document.getElementById('pipeline-container');
+    const svg = d3.select('#pipeline-svg');
+
+    // Stage detail modal
+    const modal = document.getElementById('stage-modal');
+    const modalTitle = document.getElementById('stage-modal-title');
+    const modalBody = document.getElementById('stage-modal-body');
+    document.getElementById('stage-modal-close').addEventListener('click', () => modal.close());
+    modal.addEventListener('click', (e) => { if (e.target === modal) modal.close(); });
+
+    // Keep latest stage data for click lookups
+    let latestStages = {};
+
+    function openStageDetail(stageId) {
+        const s = latestStages[stageId];
+        if (!s || !s.detail) return;
+        modalTitle.textContent = s.label;
+        modalBody.textContent = s.detail;
+        modal.showModal();
+    }
+
+    function renderPipeline(data) {
+        if (!data || !data.stages || !data.stages.length) {
+            container.style.display = 'none';
+            return;
+        }
+        container.style.display = '';
+        const stages = data.stages;
+
+        // Update lookup map
+        latestStages = {};
+        stages.forEach(s => { latestStages[s.id] = s; });
+
+        const totalW = PAD * 2 + stages.length * NODE_W + (stages.length - 1) * GAP;
+        const totalH = PAD * 2 + NODE_H + STATUS_GAP;
+        svg.attr('width', totalW).attr('height', totalH);
+
+        // --- Arrows ---
+        const arrows = [];
+        for (let i = 0; i < stages.length - 1; i++) {
+            arrows.push({ idx: i });
+        }
+        const arrowSel = svg.selectAll('.pipe-arrow').data(arrows, d => d.idx);
+        arrowSel.exit().remove();
+        const arrowEnter = arrowSel.enter().append('g').attr('class', 'pipe-arrow');
+        arrowEnter.append('line');
+        arrowEnter.append('polygon');
+        const arrowAll = arrowEnter.merge(arrowSel);
+        arrowAll.each(function(d) {
+            const g = d3.select(this);
+            const x1 = PAD + d.idx * (NODE_W + GAP) + NODE_W;
+            const x2 = PAD + (d.idx + 1) * (NODE_W + GAP);
+            const y = PAD + NODE_H / 2;
+            g.select('line')
+                .attr('x1', x1).attr('y1', y)
+                .attr('x2', x2 - ARROW).attr('y2', y)
+                .attr('stroke', '#d1d5db').attr('stroke-width', 2);
+            g.select('polygon')
+                .attr('points', `${x2 - ARROW},${y - 5} ${x2},${y} ${x2 - ARROW},${y + 5}`)
+                .attr('fill', '#d1d5db');
+        });
+
+        // --- Nodes ---
+        const nodeSel = svg.selectAll('.pipe-node').data(stages, d => d.id);
+        nodeSel.exit().remove();
+        const nodeEnter = nodeSel.enter().append('g').attr('class', 'pipe-node');
+        nodeEnter.append('rect').attr('class', 'node-bg');
+        nodeEnter.append('rect').attr('class', 'node-progress');
+        nodeEnter.append('text').attr('class', 'node-label');
+        nodeEnter.append('text').attr('class', 'node-output');
+        nodeEnter.append('text').attr('class', 'node-status');
+
+        const nodeAll = nodeEnter.merge(nodeSel);
+        nodeAll.each(function(d, i) {
+            const g = d3.select(this);
+            const x = PAD + i * (NODE_W + GAP);
+            const y = PAD;
+            const c = COLORS[d.status] || COLORS.pending;
+            const hasDetail = !!d.detail;
+
+            // Clickable cursor when detail exists
+            g.attr('cursor', hasDetail ? 'pointer' : 'default');
+            g.on('click', hasDetail ? () => openStageDetail(d.id) : null);
+
+            g.select('.node-bg')
+                .attr('x', x).attr('y', y)
+                .attr('width', NODE_W).attr('height', NODE_H)
+                .attr('rx', 8).attr('ry', 8)
+                .transition().duration(300)
+                .attr('fill', c.bg);
+
+            // Progress bar (only for running with progress)
+            const progW = (d.status === 'running' && d.progress != null) ? d.progress * (NODE_W - 4) : 0;
+            g.select('.node-progress')
+                .attr('x', x + 2).attr('y', y + NODE_H - PROGRESS_H - 2)
+                .attr('height', PROGRESS_H)
+                .attr('rx', 2).attr('ry', 2)
+                .attr('fill', 'rgba(255,255,255,0.5)')
+                .transition().duration(200)
+                .attr('width', progW);
+
+            g.select('.node-label')
+                .attr('x', x + NODE_W / 2).attr('y', d.output ? y + 23 : y + 33)
+                .attr('text-anchor', 'middle')
+                .attr('fill', c.text)
+                .attr('font-size', '13px')
+                .attr('font-weight', '600')
+                .attr('font-family', 'Inter, sans-serif')
+                .text(d.label.length > 20 ? d.label.slice(0, 18) + '...' : d.label);
+
+            g.select('.node-output')
+                .attr('x', x + NODE_W / 2).attr('y', y + 42)
+                .attr('text-anchor', 'middle')
+                .attr('fill', 'rgba(255,255,255,0.85)')
+                .attr('font-size', '11px')
+                .attr('font-family', 'Inter, sans-serif')
+                .text(d.output ? (d.output.length > 22 ? d.output.slice(0, 20) + '...' : d.output) : '');
+
+            // Status label below the node
+            const statusLabel = d.status === 'done' ? 'done' : d.status === 'error' ? 'error' : d.status === 'running' ? 'running' : d.status === 'waiting' ? 'waiting' : '';
+            g.select('.node-status')
+                .attr('x', x + NODE_W / 2).attr('y', y + NODE_H + STATUS_GAP - 2)
+                .attr('text-anchor', 'middle')
+                .attr('font-size', '11px')
+                .attr('font-weight', '500')
+                .attr('font-family', 'Inter, sans-serif')
+                .attr('fill', c.bg)
+                .text(statusLabel);
+        });
+    }
+
+    // --- Inline log + API call badges ---
+    function escHtml(s) {
+        if (!s) return '';
+        return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    }
+
+    function fmtJson(s) {
+        if (!s) return '';
+        try { return escHtml(JSON.stringify(JSON.parse(s), null, 2)); }
+        catch(e) { return escHtml(s); }
+    }
+
+    let apiCallsData = [];
+    let latestApprovals = {};
+
+    // API call detail modal
+    const apiModal = document.getElementById('api-call-modal');
+    const apiModalTitle = document.getElementById('api-call-modal-title');
+    const apiModalBody = document.getElementById('api-call-modal-body');
+    document.getElementById('api-call-modal-close').addEventListener('click', () => apiModal.close());
+    apiModal.addEventListener('click', (e) => { if (e.target === apiModal) apiModal.close(); });
+
+    window.openApiCallModal = function(idx) {
+        const c = apiCallsData[idx];
+        if (!c) return;
+        apiModalTitle.textContent = c.method + ' ' + (c.label || c.path);
+        let h = '<div style="margin-bottom:1rem">';
+        if (c.error) {
+            h += '<span class="badge badge-error">ERROR</span> ';
+        } else if (c.status_code) {
+            h += '<span class="badge ' + (c.status_code >= 400 ? 'badge-error' : 'badge-success') + '">' + c.status_code + '</span> ';
+        }
+        if (c.duration_ms != null) h += '<span style="color:var(--gray-500);font-size:0.85rem">' + Math.round(c.duration_ms) + ' ms</span>';
+        h += '</div>';
+        // Show approval explanation/reasoning if linked
+        let aid = c.approval_id || null;
+        if (!aid && c.response_body) {
+            try { const rb = JSON.parse(c.response_body); if (rb) aid = rb.approval_id; } catch(e) {}
+        }
+        if (aid && latestApprovals) {
+            const appr = latestApprovals[aid];
+            if (appr) {
+                if (appr.explanation) h += '<p style="margin:0.25rem 0;font-size:0.9rem;white-space:pre-line"><strong>What:</strong> ' + escHtml(appr.explanation) + '</p>';
+                if (appr.reasoning) h += '<p style="margin:0.15rem 0 0.5rem;font-size:0.9rem;white-space:pre-line"><strong>Why:</strong> ' + escHtml(appr.reasoning) + '</p>';
+            }
+        }
+        if (c.request_params && c.request_params !== '{}' && c.request_params !== 'null') {
+            h += '<h4 style="font-size:0.8rem;margin:0.75rem 0 0.25rem">Params</h4>';
+            h += '<pre style="max-height:300px;overflow-y:auto"><code>' + fmtJson(c.request_params) + '</code></pre>';
+        }
+        if (c.request_body) {
+            h += '<h4 style="font-size:0.8rem;margin:0.75rem 0 0.25rem">Request Body</h4>';
+            h += '<pre style="max-height:400px;overflow-y:auto"><code>' + fmtJson(c.request_body) + '</code></pre>';
+        }
+        if (c.response_body) {
+            h += '<h4 style="font-size:0.8rem;margin:0.75rem 0 0.25rem">Response</h4>';
+            h += '<pre style="max-height:400px;overflow-y:auto"><code>' + fmtJson(c.response_body) + '</code></pre>';
+        }
+        if (c.error) {
+            h += '<h4 style="font-size:0.8rem;margin:0.75rem 0 0.25rem;color:var(--red-600)">Error</h4>';
+            h += '<pre style="max-height:300px;overflow-y:auto"><code>' + escHtml(c.error) + '</code></pre>';
+        }
+        apiModalBody.innerHTML = h;
+        apiModal.showModal();
+    };
+
+    function renderLogWithApiCalls(logContent, apiCalls, approvals) {
+        const wrap = document.getElementById('log-api-container');
+        const logEmpty = document.getElementById('log-empty');
+
+        if (!logContent && (!apiCalls || !apiCalls.length)) {
+            wrap.style.display = 'none';
+            logEmpty.style.display = '';
+            return;
+        }
+        wrap.style.display = '';
+        logEmpty.style.display = 'none';
+
+        // Skip re-render if unchanged (include approval statuses in key)
+        const akey = (approvals || []).map(a => a.id + a.status).join('');
+        const rkey = String((logContent || '').length) + ':' + (apiCalls ? apiCalls.length : 0) + ':' + akey;
+        if (wrap.dataset.rkey === rkey) return;
+        wrap.dataset.rkey = rkey;
+
+        apiCallsData = apiCalls || [];
+
+        // Build approval_id → approval map
+        const approvalMap = {};
+        (approvals || []).forEach(function(a) { approvalMap[a.id] = a; });
+        latestApprovals = approvalMap;
+
+        // Build call_id → index map
+        const callMap = {};
+        apiCallsData.forEach(function(c, i) {
+            if (c.call_id) callMap[c.call_id] = i;
+        });
+
+        const lines = (logContent || '').split('\n');
+        if (lines.length && lines[lines.length - 1] === '') lines.pop();
+
+        let html = '';
+        lines.forEach(function(line) {
+            let badge = '';
+            for (const cid in callMap) {
+                if (line.indexOf('[' + cid + ']') !== -1) {
+                    const c = apiCallsData[callMap[cid]];
+                    const idx = callMap[cid];
+
+                    // Check for linked approval
+                    let aid = c.approval_id || null;
+                    if (!aid && c.response_body) {
+                        try { const rb = JSON.parse(c.response_body); if (rb) aid = rb.approval_id; } catch(e) {}
+                    }
+                    const appr = aid ? approvalMap[aid] : null;
+
+                    let cls, st, suffix = '';
+                    if (appr) {
+                        st = c.status_code || 202;
+                        if (appr.status === 'draft') {
+                            cls = 'api-badge-ok';
+                            suffix = '<span style="opacity:0.6;margin-left:4px;font-size:0.75em">draft</span>';
+                        } else if (appr.status === 'pending') {
+                            cls = 'api-badge-pending';
+                            suffix = '<button onclick="inlineApprove(event,\'' + aid + '\',\'approve\')" class="api-approve-btn" title="Approve">&#10003;</button>'
+                                   + '<button onclick="inlineApprove(event,\'' + aid + '\',\'reject\')" class="api-reject-btn" title="Reject">&#10007;</button>';
+                        } else if (appr.status === 'approved' || appr.status === 'executed') {
+                            cls = 'api-badge-approved';
+                            suffix = '<span class="api-badge-verdict api-verdict-ok">&#10003;</span>';
+                        } else if (appr.status === 'rejected' || appr.status === 'failed') {
+                            cls = 'api-badge-rejected';
+                            suffix = '<span class="api-badge-verdict api-verdict-err">&#10007;</span>';
+                        } else {
+                            cls = 'api-badge-ok';
+                        }
+                    } else if (c.error || (c.status_code && c.status_code >= 400)) {
+                        cls = 'api-badge-err'; st = c.error ? 'ERR' : c.status_code;
+                    } else {
+                        cls = 'api-badge-ok'; st = c.status_code || '?';
+                    }
+
+                    const dur = c.duration_ms != null ? Math.round(c.duration_ms) + 'ms' : '';
+                    badge = '<span class="api-badge ' + cls + '" onclick="openApiCallModal(' + idx + ')">'
+                        + '<span class="api-badge-status">' + st + '</span> '
+                        + escHtml(c.method) + ' ' + escHtml(c.label || c.path)
+                        + (dur ? ' <span class="api-badge-dur">' + dur + '</span>' : '')
+                        + suffix
+                        + '</span>';
+                    delete callMap[cid];
+                    break;
+                }
+            }
+            html += '<div class="log-api-line"><span class="log-text">' + escHtml(line) + '</span>' + badge + '</div>';
+        });
+
+        const wasAtBottom = wrap.scrollTop + wrap.clientHeight >= wrap.scrollHeight - 20;
+        wrap.innerHTML = html;
+        if (wasAtBottom) wrap.scrollTop = wrap.scrollHeight;
+    }
+
+    // Inline approve/reject from API badge (no button state to manage)
+    window.inlineApprove = async function(ev, approvalId, action) {
+        ev.stopPropagation();
+        const btn = ev.currentTarget;
+        btn.style.opacity = '0.4';
+        btn.style.pointerEvents = 'none';
+        try {
+            await fetch('/approvals/' + approvalId + '/' + action, {
+                method: 'POST',
+                headers: { 'Accept': 'application/json' },
+            });
+            const liveResp = await fetch('/runs/{{ run.id }}/live');
+            if (liveResp.ok) {
+                const data = await liveResp.json();
+                renderLogWithApiCalls(data.log_content || '', data.api_calls || [], data.approvals || []);
+                renderApprovals(data.approvals || []);
+                updateRunStatus(data);
+            }
+        } catch (e) {}
+    };
+
+    // Render initial pipeline data (works for finished runs too)
+    {% if pipeline_data %}
+    renderPipeline({{ pipeline_data | tojson }});
+    {% endif %}
+
+    // Render initial log + API calls + approvals
+    renderLogWithApiCalls({{ (log_content or '') | tojson }}, {{ (api_calls or []) | tojson }}, {{ (approvals_data or []) | tojson }});
+
+    // --- Approval AJAX ---
+    window.resolveApproval = async function(approvalId, action) {
+        const btn = event.target;
+        btn.disabled = true;
+        btn.textContent = action === 'approve' ? 'Approving...' : 'Rejecting...';
+        try {
+            const resp = await fetch(`/approvals/${approvalId}/${action}`, {
+                method: 'POST',
+                headers: { 'Accept': 'application/json' },
+            });
+            if (resp.ok) {
+                // Refresh the page state via a single poll
+                const liveResp = await fetch(`/runs/{{ run.id }}/live`);
+                if (liveResp.ok) {
+                    const data = await liveResp.json();
+                    renderLogWithApiCalls(data.log_content || '', data.api_calls || [], data.approvals || []);
+                    renderApprovals(data.approvals || []);
+                    updateRunStatus(data);
+                }
+            }
+        } catch (e) {
+            btn.disabled = false;
+            btn.textContent = action === 'approve' ? 'Approve' : 'Reject';
+        }
+    };
+
+    function statusClass(s) {
+        if (s === 'success') return 'badge badge-success';
+        if (s === 'error') return 'badge badge-error';
+        if (s === 'awaiting_approval') return 'badge badge-warning';
+        return 'badge badge-running';
+    }
+
+    function statusLabel(s) {
+        if (s === 'awaiting_approval') return 'awaiting approval';
+        return s;
+    }
+
+    function badgeHtml(status) {
+        if (status === 'draft') return '<span class="badge badge-neutral" style="background:#6b7280;color:#fff">draft — not executed</span>';
+        if (status === 'pending') return '<span class="badge badge-warning">pending</span>';
+        if (status === 'approved' || status === 'executed') return `<span class="badge badge-success">${status}</span>`;
+        if (status === 'rejected' || status === 'failed') return `<span class="badge badge-error">${status}</span>`;
+        return `<span class="badge badge-neutral">${status}</span>`;
+    }
+
+    function renderApprovals(approvals) {
+        const section = document.getElementById('approvals-section');
+        const list = document.getElementById('approvals-list');
+        if (!approvals || !approvals.length) {
+            section.style.display = 'none';
+            return;
+        }
+        section.style.display = '';
+
+        // Build a map of existing cards so we can update in-place
+        const existing = {};
+        list.querySelectorAll('.approval-card[data-id]').forEach(el => {
+            existing[el.dataset.id] = el;
+        });
+
+        approvals.forEach(a => {
+            const card = existing[a.id];
+            if (card) {
+                // Update badge only (don't touch <details> open state)
+                const badge = card.querySelector('.approval-badge');
+                if (badge) badge.innerHTML = badgeHtml(a.status);
+
+                // Remove action buttons once no longer pending
+                if (a.status !== 'pending') {
+                    const actions = card.querySelector('.approval-actions');
+                    if (actions) actions.remove();
+                }
+                delete existing[a.id];
+            } else {
+                // New approval — append full card
+                let explReas = '';
+                if (a.explanation) explReas += `<p style="margin:0.25rem 0 0;font-size:0.9rem;white-space:pre-line"><strong>What:</strong> ${a.explanation}</p>`;
+                if (a.reasoning) explReas += `<p style="margin:0.15rem 0 0;font-size:0.9rem;white-space:pre-line"><strong>Why:</strong> ${a.reasoning}</p>`;
+                let params = '';
+                if (a.request_body) {
+                    let pretty = a.request_body;
+                    try { pretty = JSON.stringify(JSON.parse(a.request_body), null, 2); } catch(e) {}
+                    params = `<details class="approval-params"><summary>Request params</summary><pre><code>${pretty}</code></pre></details>`;
+                }
+                let actions = '';
+                if (a.status === 'pending') {
+                    actions = `<div class="approval-actions">
+                        <button class="btn-approve" onclick="resolveApproval('${a.id}', 'approve')">Approve</button>
+                        <button class="btn-reject" onclick="resolveApproval('${a.id}', 'reject')">Reject</button>
+                    </div>`;
+                }
+                list.insertAdjacentHTML('beforeend', `<div class="approval-card" data-id="${a.id}">
+                    <div class="approval-info"><strong>${a.endpoint}</strong> <span class="approval-badge">${badgeHtml(a.status)}</span>${explReas}${params}</div>
+                    ${actions}
+                </div>`);
+            }
+        });
+    }
+
+    function updateRunStatus(data) {
+        const statusEl = document.getElementById('run-status');
+        const finishedEl = document.getElementById('run-finished');
+        const exitCodeEl = document.getElementById('run-exit-code');
+        if (statusEl) {
+            statusEl.textContent = statusLabel(data.status);
+            statusEl.className = statusClass(data.status);
+        }
+        if (data.finished_at && finishedEl) finishedEl.textContent = data.finished_at;
+        if (data.exit_code !== null && data.exit_code !== undefined && exitCodeEl) exitCodeEl.textContent = data.exit_code;
+    }
+
+    // --- Expand All for approval params ---
+    (function() {
+        const btn = document.getElementById('expand-all-approvals');
+        if (!btn) return;
+        let expanded = false;
+        function refreshBtn() {
+            const details = document.querySelectorAll('.approval-params');
+            btn.style.display = details.length > 0 ? '' : 'none';
+        }
+        refreshBtn();
+        btn.addEventListener('click', function() {
+            expanded = !expanded;
+            document.querySelectorAll('.approval-params').forEach(function(d) { d.open = expanded; });
+            btn.textContent = expanded ? 'Collapse All' : 'Expand All';
+        });
+        // Re-check when approvals are re-rendered
+        const observer = new MutationObserver(refreshBtn);
+        const list = document.getElementById('approvals-list');
+        if (list) observer.observe(list, { childList: true, subtree: true });
+    })();
+
+    {% if run.status in ('running', 'awaiting_approval') %}
+    const runId = "{{ run.id }}";
+    const stopBtn = document.getElementById('stop-btn');
+    let polling = true;
+    let pollInterval = "{{ run.status }}" === 'awaiting_approval' ? 2000 : 100;
+
+    async function poll() {
+        if (!polling) return;
+        try {
+            const resp = await fetch(`/runs/${runId}/live`);
+            if (!resp.ok) return;
+            const data = await resp.json();
+
+            // Update pipeline
+            if (data.pipeline) {
+                renderPipeline(data.pipeline);
+            }
+
+            // Update log + API calls + approvals (combined)
+            renderLogWithApiCalls(data.log_content || '', data.api_calls || [], data.approvals || []);
+
+            // Update approvals
+            renderApprovals(data.approvals || []);
+
+            // Update status
+            updateRunStatus(data);
+
+            if (data.status === 'awaiting_approval') {
+                pollInterval = 2000;
+            } else if (data.status !== 'running') {
+                polling = false;
+                if (stopBtn) stopBtn.style.display = 'none';
+            }
+        } catch (e) {
+            // Ignore fetch errors, retry next tick
+        }
+        if (polling) setTimeout(poll, pollInterval);
+    }
+
+    setTimeout(poll, pollInterval);
+    {% endif %}
+})();
+</script>
+
+{% else %}
+<h1>Run Not Found</h1>
+<p><a href="/logs">Back to logs</a></p>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "nanos-sdk"
+version = "0.1.0"
+description = "SDK for Nanos framework — auto-generated typed client"
+requires-python = ">=3.11"
+dependencies = [
+    "httpx>=0.28.0",
+    "pydantic>=2.0.0",
+]
+
+[project.optional-dependencies]
+dev = ["openapi-python-client>=0.21.0"]

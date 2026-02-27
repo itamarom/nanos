@@ -1,0 +1,248 @@
+{% extends "base.html" %}
+{% block title %}{{ type_info.type_name }} - Nanos Dashboard{% endblock %}
+{% block content %}
+<div class="page-header">
+    <h1>{{ type_info.type_name }}</h1>
+    <button class="btn btn-danger btn-sm" onclick="document.getElementById('delete-type-modal').showModal()">Delete Type</button>
+    <p>{{ type_info.description }}</p>
+</div>
+
+<!-- Delete Type confirmation modal -->
+<dialog id="delete-type-modal">
+    <div class="modal-content">
+        <div class="modal-header">
+            <h3>Delete Type: {{ type_info.type_name }}</h3>
+            <button class="modal-close" onclick="this.closest('dialog').close()">&times;</button>
+        </div>
+        <div class="modal-body">
+            {% if instances %}
+            <p style="color:var(--warning);font-weight:600">Warning: This will also delete {{ instances|length }} instance(s):</p>
+            <ul>
+                {% for nano in instances %}
+                <li><code>{{ nano.name }}</code></li>
+                {% endfor %}
+            </ul>
+            <p>All run history, approvals, and API keys for these instances will be permanently removed.</p>
+            {% else %}
+            <p>Are you sure you want to delete the type <strong>{{ type_info.type_name }}</strong>? This removes the type directory from disk.</p>
+            {% endif %}
+        </div>
+        <div class="modal-footer">
+            <button type="button" class="btn btn-secondary" onclick="this.closest('dialog').close()">Cancel</button>
+            <form method="post" action="/types/{{ type_info.type_name }}/delete" style="display:inline">
+                <button type="submit" class="btn btn-danger">Delete</button>
+            </form>
+        </div>
+    </div>
+</dialog>
+<script>
+document.getElementById('delete-type-modal').addEventListener('click', (e) => {
+    if (e.target === e.currentTarget) e.currentTarget.close();
+});
+</script>
+
+<div class="detail-grid">
+    <div class="card">
+        <div class="card-header">Type Config</div>
+        <dl>
+            <dt>Name</dt>
+            <dd>{{ type_info.name }}</dd>
+            <dt>Default Schedule</dt>
+            <dd><code>{{ type_info.schedule or 'manual' }}</code></dd>
+            <dt>Script</dt>
+            <dd><code>{{ type_info.type_name }}/nano.py</code></dd>
+        </dl>
+    </div>
+    <div class="card">
+        <div class="card-header">Type Permissions</div>
+        <ul>
+            {% for p in type_info.permissions %}
+            <li><code{% if p in SENSITIVE_ENDPOINTS %} class="sensitive" title="Requires approval"{% endif %}>{{ p }}</code></li>
+            {% endfor %}
+        </ul>
+    </div>
+</div>
+
+{% if type_info.parameter_schema %}
+<h2>Parameter Schema</h2>
+<div class="table-card">
+<table>
+    <thead>
+        <tr>
+            <th>Parameter</th>
+            <th>Type</th>
+            <th>Default</th>
+            <th>Description</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for key, spec in type_info.parameter_schema.items() %}
+        <tr>
+            <td><code>{{ key }}</code></td>
+            <td>{{ spec.type if spec is mapping else spec }}</td>
+            <td>{{ spec.default if spec is mapping and spec.default is defined else '-' }}</td>
+            <td>{{ spec.description if spec is mapping else '' }}</td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+</div>
+{% endif %}
+
+<div style="display:flex;align-items:center;gap:0.75rem;margin-top:1.5rem">
+    <h2 style="margin:0">Instances ({{ instances|length }})</h2>
+    <button class="btn btn-primary btn-sm" onclick="document.getElementById('create-modal').showModal()">Create Instance</button>
+</div>
+
+<!-- Create Instance modal -->
+<dialog id="create-modal">
+    <div class="modal-content">
+        <div class="modal-header">
+            <h3>Create Instance of {{ type_info.type_name }}</h3>
+            <button class="modal-close" onclick="this.closest('dialog').close()">&times;</button>
+        </div>
+        <form id="create-form">
+            <div class="modal-body">
+                <label for="ci-name">Instance Name</label>
+                <input type="text" id="ci-name" name="name" required
+                       placeholder="{{ type_info.type_name }}" value="{{ type_info.type_name }}">
+
+                <label for="ci-schedule">Schedule <small style="font-weight:normal;color:var(--text-secondary)">(optional cron expression)</small></label>
+                <input type="text" id="ci-schedule" name="schedule"
+                       placeholder="e.g. 0 9 * * 1-5 (leave empty for manual)"
+                       value="{{ type_info.schedule or '' }}">
+
+                {% if type_info.parameter_schema %}
+                <label>Parameters</label>
+                {% for key, spec in type_info.parameter_schema.items() %}
+                <div style="margin-bottom:0.65rem">
+                    <label for="ci-param-{{ key }}" style="font-size:0.85rem;margin-bottom:0.15rem">
+                        <code>{{ key }}</code>
+                        {% if spec is mapping and spec.description %}
+                        <small style="font-weight:normal;color:var(--text-secondary)">— {{ spec.description }}</small>
+                        {% endif %}
+                    </label>
+                    {% if spec is mapping and spec.type == 'string' and key == 'prompt' %}
+                    <textarea id="ci-param-{{ key }}" name="param_{{ key }}" rows="3"
+                              placeholder="{{ spec.default if spec is mapping and spec.default is defined else '' }}"
+                              style="width:100%">{{ spec.default if spec is mapping and spec.default is defined else '' }}</textarea>
+                    {% else %}
+                    <input type="text" id="ci-param-{{ key }}" name="param_{{ key }}"
+                           value="{{ spec.default if spec is mapping and spec.default is defined else '' }}"
+                           placeholder="{{ spec.type if spec is mapping else '' }}">
+                    {% endif %}
+                </div>
+                {% endfor %}
+                {% endif %}
+
+                <label>Permissions</label>
+                <div style="display:grid;grid-template-columns:1fr 1fr;gap:0.25rem 1rem;margin-bottom:0.75rem">
+                {% for perm in ALL_PERMISSIONS %}
+                    {% set is_baseline = perm in type_info.permissions %}
+                    <label style="font-size:0.85rem;font-weight:normal;display:flex;align-items:center;gap:0.35rem;{% if perm in SENSITIVE_ENDPOINTS %}color:var(--warning){% endif %}">
+                        {% if is_baseline %}
+                        <input type="checkbox" name="permissions" value="{{ perm }}" checked disabled>
+                        <input type="hidden" name="permissions" value="{{ perm }}">
+                        {% else %}
+                        <input type="checkbox" name="permissions" value="{{ perm }}">
+                        {% endif %}
+                        <code style="font-size:0.8rem">{{ perm }}</code>
+                        {% if is_baseline %}<small style="color:var(--text-secondary)">(baseline)</small>{% endif %}
+                        {% if perm in SENSITIVE_ENDPOINTS %}<small style="color:var(--warning)">(approval)</small>{% endif %}
+                    </label>
+                {% endfor %}
+                </div>
+
+                <div id="ci-error" style="color:var(--error);font-size:0.85rem;display:none"></div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" onclick="this.closest('dialog').close()">Cancel</button>
+                <button type="submit" class="btn btn-primary" id="ci-submit">Create</button>
+            </div>
+        </form>
+    </div>
+</dialog>
+
+<script>
+document.getElementById('create-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const errorEl = document.getElementById('ci-error');
+    const submitBtn = document.getElementById('ci-submit');
+    errorEl.style.display = 'none';
+    submitBtn.disabled = true;
+    submitBtn.textContent = 'Creating...';
+
+    const form = e.target;
+    const formData = new FormData(form);
+
+    try {
+        const resp = await fetch('/types/{{ type_info.type_name }}/create-instance', {
+            method: 'POST',
+            body: formData,
+        });
+        const data = await resp.json();
+        if (!resp.ok || data.error) {
+            errorEl.textContent = data.error || data.detail || 'Failed to create instance';
+            errorEl.style.display = 'block';
+            submitBtn.disabled = false;
+            submitBtn.textContent = 'Create';
+            return;
+        }
+        // Success — go straight to the instance page
+        window.location.href = '/nanos/' + data.name;
+    } catch (err) {
+        errorEl.textContent = 'Request failed: ' + err.message;
+        errorEl.style.display = 'block';
+        submitBtn.disabled = false;
+        submitBtn.textContent = 'Create';
+    }
+});
+
+// Close on backdrop click
+document.getElementById('create-modal').addEventListener('click', (e) => {
+    if (e.target === e.currentTarget) e.currentTarget.close();
+});
+</script>
+
+{% if instances %}
+<div class="table-card">
+<table>
+    <thead>
+        <tr>
+            <th>Name</th>
+            <th>Status</th>
+            <th>Schedule</th>
+            <th>Created</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for nano in instances %}
+        <tr class="clickable-row" onclick="window.location='/nanos/{{ nano.name }}'">
+            <td><a href="/nanos/{{ nano.name }}">{{ nano.name }}</a></td>
+            <td>
+                {% if nano.is_active %}
+                <span class="badge badge-success">active</span>
+                {% else %}
+                <span class="badge badge-error">inactive</span>
+                {% endif %}
+            </td>
+            <td><code>{{ nano.schedule or 'manual' }}</code></td>
+            <td>{{ nano.created_at.strftime('%Y-%m-%d') }}</td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+</div>
+{% else %}
+<p>No instances of this type yet. Click <strong>Create Instance</strong> above to get started.</p>
+{% endif %}
+
+{% if code %}
+<h2>Source Code</h2>
+<pre><code class="language-python">{{ code }}</code></pre>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/languages/python.min.js"></script>
+<script>hljs.highlightAll();</script>
+{% endif %}
+{% endblock %}

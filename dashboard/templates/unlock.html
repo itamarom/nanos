@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% if is_setup %}Initial Setup{% else %}Unlock{% endif %} — Nanos Dashboard</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/style.css">
+    <style>
+        body {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 100vh;
+            background: linear-gradient(135deg, var(--gray-50) 0%, var(--gray-100) 100%);
+            margin: 0;
+        }
+
+        .unlock-card {
+            background: #fff;
+            border: 1px solid var(--gray-200);
+            border-radius: 16px;
+            padding: 3rem 2.5rem 2.5rem;
+            width: 100%;
+            max-width: 380px;
+            text-align: center;
+            box-shadow: var(--shadow-md), 0 8px 24px rgba(0,0,0,0.04);
+        }
+
+        .lock-icon {
+            width: 56px;
+            height: 56px;
+            border-radius: 14px;
+            background: var(--blue-50);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0 auto 1.5rem;
+            font-size: 1.5rem;
+        }
+        .lock-icon svg {
+            width: 28px;
+            height: 28px;
+            stroke: var(--blue-600);
+            fill: none;
+            stroke-width: 1.5;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+        }
+
+        .brand {
+            font-size: 1.1rem;
+            font-weight: 600;
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+            color: var(--gray-400);
+            margin-bottom: 1.5rem;
+        }
+
+        .unlock-card h1 {
+            font-size: 1.35rem;
+            font-weight: 700;
+            margin: 0 0 0.5rem;
+            color: var(--gray-900);
+        }
+
+        .unlock-card p {
+            color: var(--gray-500);
+            margin: 0 0 1.75rem;
+            font-size: 0.85rem;
+            line-height: 1.6;
+        }
+
+        .setup-badge {
+            display: inline-block;
+            background: linear-gradient(135deg, var(--blue-600), var(--blue-700));
+            color: #fff;
+            font-size: 0.65rem;
+            font-weight: 700;
+            padding: 0.25rem 0.7rem;
+            border-radius: var(--radius-full);
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            margin-bottom: 1rem;
+        }
+
+        .field-group {
+            position: relative;
+            margin-bottom: 0.75rem;
+        }
+
+        .field-group input[type="password"] {
+            width: 100%;
+            padding: 0.8rem 1rem;
+            border: 1.5px solid var(--gray-200);
+            border-radius: 10px;
+            background: var(--gray-50);
+            color: var(--gray-900);
+            font-family: inherit;
+            font-size: 0.95rem;
+            box-sizing: border-box;
+            transition: border-color 0.15s, box-shadow 0.15s;
+        }
+        .field-group input[type="password"]::placeholder { color: var(--gray-400); }
+        .field-group input[type="password"]:focus {
+            outline: none;
+            border-color: var(--blue-500);
+            box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.12);
+            background: #fff;
+        }
+
+        .submit-btn {
+            width: 100%;
+            padding: 0.8rem;
+            margin-top: 0.5rem;
+            background: linear-gradient(135deg, var(--blue-600), var(--blue-700));
+            color: #fff;
+            border: none;
+            border-radius: 10px;
+            font-family: inherit;
+            font-size: 0.95rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: opacity 0.15s, transform 0.1s;
+        }
+        .submit-btn:hover { opacity: 0.92; }
+        .submit-btn:active { transform: scale(0.98); }
+
+        .error-msg {
+            color: var(--red-600);
+            background: var(--red-50);
+            border: 1px solid var(--red-100);
+            font-size: 0.82rem;
+            padding: 0.6rem 0.8rem;
+            border-radius: 8px;
+            margin-bottom: 1rem;
+            display: none;
+        }
+
+        .reset-link {
+            display: inline-block;
+            margin-top: 1.75rem;
+            padding-top: 1.25rem;
+            border-top: 1px solid var(--gray-100);
+            width: 100%;
+            color: var(--gray-400);
+            font-family: inherit;
+            font-size: 0.78rem;
+            cursor: pointer;
+            text-decoration: none;
+            background: none;
+            border-left: none;
+            border-right: none;
+            border-bottom: none;
+            font-weight: 400;
+            transition: color 0.15s;
+        }
+        .reset-link:hover { color: var(--red-600); }
+    </style>
+</head>
+<body>
+    <div class="unlock-card">
+        <div class="brand">Nanos</div>
+        {% if is_setup %}
+        <div class="lock-icon">
+            <svg viewBox="0 0 24 24"><path d="M12 2a4 4 0 0 1 4 4v3H8V6a4 4 0 0 1 4-4z"/><rect x="5" y="9" width="14" height="12" rx="2"/><circle cx="12" cy="15.5" r="1.5"/></svg>
+        </div>
+        <div class="setup-badge">Initial Setup</div>
+        <h1>Set Master Password</h1>
+        <p>This password encrypts all API credentials at rest. It is never stored — you'll need to re-enter it each time the system restarts.</p>
+        <div class="error-msg" id="error"></div>
+        <form id="unlockForm">
+            <div class="field-group">
+                <input type="password" id="masterKey" placeholder="Choose a master password" autofocus>
+            </div>
+            <div class="field-group">
+                <input type="password" id="confirmKey" placeholder="Confirm master password">
+            </div>
+            <button type="submit" class="submit-btn">Set Password</button>
+        </form>
+        {% else %}
+        <div class="lock-icon">
+            <svg viewBox="0 0 24 24"><path d="M17 9V6a5 5 0 0 0-10 0v3"/><rect x="5" y="9" width="14" height="12" rx="2"/><circle cx="12" cy="15.5" r="1.5"/></svg>
+        </div>
+        <h1>System Locked</h1>
+        <p>Enter the master password to decrypt API credentials and unlock the system.</p>
+        <div class="error-msg" id="error"></div>
+        <form id="unlockForm">
+            <div class="field-group">
+                <input type="password" id="masterKey" placeholder="Master password" autofocus>
+            </div>
+            <button type="submit" class="submit-btn">Unlock</button>
+        </form>
+        <button class="reset-link" onclick="resetSystem()">Clear all credentials and reset password</button>
+        {% endif %}
+    </div>
+    <script>
+        const isSetup = {{ is_setup | tojson }};
+
+        document.getElementById('unlockForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const key = document.getElementById('masterKey').value;
+            const errorEl = document.getElementById('error');
+            errorEl.style.display = 'none';
+
+            if (!key) {
+                errorEl.textContent = 'Password is required';
+                errorEl.style.display = 'block';
+                return;
+            }
+
+            if (isSetup) {
+                const confirm = document.getElementById('confirmKey').value;
+                if (key !== confirm) {
+                    errorEl.textContent = 'Passwords do not match';
+                    errorEl.style.display = 'block';
+                    return;
+                }
+            }
+
+            try {
+                const resp = await fetch('/unlock', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({master_key: key}),
+                });
+                const data = await resp.json();
+                if (data.success) {
+                    window.location.href = '/';
+                } else {
+                    errorEl.textContent = data.error || 'Unlock failed';
+                    errorEl.style.display = 'block';
+                }
+            } catch (err) {
+                errorEl.textContent = 'Connection error';
+                errorEl.style.display = 'block';
+            }
+        });
+
+        async function resetSystem() {
+            if (!confirm('This will permanently delete ALL stored API credentials. You will need to re-configure every API.\n\nAre you sure?')) return;
+            if (!confirm('This cannot be undone. Continue?')) return;
+
+            try {
+                const resp = await fetch('/reset', {method: 'POST'});
+                const data = await resp.json();
+                if (data.success) {
+                    window.location.reload();
+                } else {
+                    alert('Reset failed: ' + (data.error || 'Unknown error'));
+                }
+            } catch (err) {
+                alert('Reset error: ' + err.message);
+            }
+        }
+    </script>
+</body>
+</html>

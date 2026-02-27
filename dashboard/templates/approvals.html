@@ -1,0 +1,309 @@
+{% extends "base.html" %}
+{% block title %}Approvals - Nanos Dashboard{% endblock %}
+{% block content %}
+<div class="page-header" style="display:flex;align-items:center;gap:1rem">
+    <h1 style="margin:0">Approvals</h1>
+    {% if approvals and approvals | selectattr('status', 'equalto', 'pending') | list %}
+    <button type="button" class="btn btn-primary btn-sm" id="review-pending-btn">Review Pending</button>
+    <form method="post" action="/approvals/reject-all" style="display:inline"
+          onsubmit="return confirm('Reject all pending approvals?')">
+        <button type="submit" class="btn btn-danger btn-sm">Reject All Pending</button>
+    </form>
+    {% endif %}
+    <button type="button" class="btn btn-secondary btn-sm" id="expand-all-btn" style="display:none">Expand All</button>
+</div>
+
+{% if approvals %}
+<div class="table-card">
+<table style="table-layout:fixed">
+    <colgroup>
+        <col style="width:13%">
+        <col style="width:22%">
+        <col style="width:8%">
+        <col style="width:10%">
+        <col style="width:14%">
+        <col style="width:14%">
+        <col style="width:19%">
+    </colgroup>
+    <thead>
+        <tr>
+            <th>Nano</th>
+            <th>Endpoint</th>
+            <th>Method</th>
+            <th>Status</th>
+            <th>Created</th>
+            <th>Wait Until</th>
+            <th>Actions</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for a in approvals %}
+        {% set is_future_wait = a.status == 'pending' and a.wait_until_date and a.wait_until_date > now %}
+        <tr{% if a.status == 'pending' %} class="pending-row" data-id="{{ a.id }}"{% endif %}{% if is_future_wait %} data-wait-until="{{ a.wait_until_date.isoformat() }}"{% endif %}>
+            <td><a href="/nanos/{{ a.nano.name }}">{{ a.nano.name }}</a></td>
+            <td><code>{{ a.endpoint }}</code></td>
+            <td>{{ a.method }}</td>
+            <td>
+                {% if a.status == 'pending' %}
+                <span class="badge badge-warning">pending</span>
+                {% elif a.status == 'approved' or a.status == 'executed' %}
+                <span class="badge badge-success">{{ a.status }}</span>
+                {% elif a.status == 'rejected' %}
+                <span class="badge badge-error">rejected</span>
+                {% elif a.status == 'failed' %}
+                <span class="badge badge-error">failed</span>
+                {% endif %}
+            </td>
+            <td>{{ a.created_at.strftime('%Y-%m-%d %H:%M') }}</td>
+            <td>
+                {% if a.wait_until_date %}
+                {{ a.wait_until_date.strftime('%Y-%m-%d %H:%M') }}
+                {% if is_future_wait %}<span class="badge badge-neutral" style="margin-left:0.25rem">not yet</span>{% endif %}
+                {% else %}-{% endif %}
+            </td>
+            <td>
+                {% if a.status == 'pending' %}
+                <div class="inline-flex gap-sm">
+                    <form method="post" action="/approvals/{{ a.id }}/approve" style="display:inline" class="approval-form">
+                        <button type="submit" class="btn btn-success btn-sm{% if is_future_wait %} btn-muted{% endif %}">Approve</button>
+                    </form>
+                    <form method="post" action="/approvals/{{ a.id }}/reject" style="display:inline" class="approval-form">
+                        <button type="submit" class="btn btn-danger btn-sm{% if is_future_wait %} btn-muted{% endif %}">Reject</button>
+                    </form>
+                </div>
+                {% else %}
+                {{ a.resolved_at.strftime('%H:%M') if a.resolved_at else '-' }}
+                {% endif %}
+            </td>
+        </tr>
+        {% if a.explanation or a.reasoning or a.request_body %}
+        <tr>
+            <td colspan="7" style="padding-top:0; border-top:none;">
+                {% if a.explanation %}<p style="margin:0.25rem 0;font-size:0.85rem;white-space:pre-line"><strong>What:</strong> {{ a.explanation }}</p>{% endif %}
+                {% if a.reasoning %}<p style="margin:0.25rem 0;font-size:0.85rem;white-space:pre-line"><strong>Why:</strong> {{ a.reasoning }}</p>{% endif %}
+                {% if a.request_body %}
+                <details>
+                    <summary class="text-muted text-sm" style="cursor:pointer">Request parameters</summary>
+                    <pre style="margin:0.5rem 0 0; font-size:0.8rem; white-space:pre-wrap; word-break:break-word;"><code>{{ a.request_body | tojson_pretty }}</code></pre>
+                </details>
+                {% endif %}
+            </td>
+        </tr>
+        {% endif %}
+        {% endfor %}
+    </tbody>
+</table>
+</div>
+{% else %}
+<p>No approvals to show.</p>
+{% endif %}
+
+<dialog id="review-modal">
+    <div class="modal-content">
+        <div class="modal-header">
+            <strong>Review Approvals</strong>
+            <button class="modal-close" id="review-modal-close">&times;</button>
+        </div>
+        <div class="modal-body">
+            <div class="review-progress-bar"><div class="review-progress-fill" id="review-progress"></div></div>
+            <div class="review-counter" id="review-counter"></div>
+            <div id="review-card"></div>
+            <div class="review-done" id="review-done" style="display:none">All reviewed!</div>
+        </div>
+        <div class="review-footer" id="review-footer">
+            <button class="btn btn-danger" id="review-reject-btn">Reject</button>
+            <button class="btn btn-success" id="review-approve-btn">Approve</button>
+        </div>
+    </div>
+</dialog>
+
+<script type="application/json" id="pending-approvals-data">
+[{% for a in approvals if a.status == 'pending' %}{% if not loop.first %},{% endif %}{"id":"{{ a.id }}","nanoName":"{{ a.nano.name }}","endpoint":"{{ a.endpoint }}","method":"{{ a.method }}","explanation":{{ (a.explanation or '') | tojson }},"reasoning":{{ (a.reasoning or '') | tojson }},"requestBody":{{ a.request_body | tojson if a.request_body else 'null' }},"waitUntilDate":{{ a.wait_until_date.isoformat() | tojson if a.wait_until_date else 'null' }}}{% endfor %}]
+</script>
+
+<script>
+(function() {
+    // --- Expand All ---
+    const expandBtn = document.getElementById('expand-all-btn');
+    const allDetails = document.querySelectorAll('.table-card details');
+    if (allDetails.length > 0 && expandBtn) {
+        expandBtn.style.display = '';
+        let expanded = false;
+        expandBtn.addEventListener('click', function() {
+            expanded = !expanded;
+            allDetails.forEach(function(d) { d.open = expanded; });
+            expandBtn.textContent = expanded ? 'Collapse All' : 'Expand All';
+        });
+    }
+
+    // --- Review Modal ---
+    const modal = document.getElementById('review-modal');
+    const reviewBtn = document.getElementById('review-pending-btn');
+    const closeBtn = document.getElementById('review-modal-close');
+    const progressBar = document.getElementById('review-progress');
+    const counter = document.getElementById('review-counter');
+    const card = document.getElementById('review-card');
+    const doneEl = document.getElementById('review-done');
+    const footer = document.getElementById('review-footer');
+    const approveBtn = document.getElementById('review-approve-btn');
+    const rejectBtn = document.getElementById('review-reject-btn');
+
+    if (!reviewBtn || !modal) return;
+
+    // Load pending data from JSON blob (avoids HTML attribute escaping issues)
+    let pendingData = [];
+    try {
+        pendingData = JSON.parse(document.getElementById('pending-approvals-data').textContent);
+    } catch(e) {}
+
+    let queue = [];
+    let currentIdx = 0;
+
+    function escHtml(s) {
+        const d = document.createElement('div');
+        d.textContent = s;
+        return d.innerHTML;
+    }
+
+    function fmtJson(obj) {
+        if (!obj) return '';
+        try {
+            const s = typeof obj === 'string' ? obj : JSON.stringify(obj, null, 2);
+            const parsed = typeof obj === 'string' ? JSON.parse(obj) : obj;
+            return escHtml(JSON.stringify(parsed, null, 2));
+        } catch(e) { return escHtml(String(obj)); }
+    }
+
+    function buildQueue() {
+        queue = [];
+        const rows = {};
+        document.querySelectorAll('tr.pending-row').forEach(function(tr) {
+            rows[tr.dataset.id] = tr;
+        });
+        pendingData.forEach(function(item) {
+            if (rows[item.id]) {
+                queue.push({ ...item, row: rows[item.id] });
+            }
+        });
+    }
+
+    function isNotYet(item) {
+        if (!item.waitUntilDate) return false;
+        return new Date(item.waitUntilDate) > new Date();
+    }
+
+    function renderCurrent() {
+        if (currentIdx >= queue.length) {
+            card.style.display = 'none';
+            footer.style.display = 'none';
+            doneEl.style.display = '';
+            progressBar.style.width = '100%';
+            counter.textContent = 'Done!';
+            setTimeout(function() { modal.close(); }, 1000);
+            return;
+        }
+        card.style.display = '';
+        footer.style.display = '';
+        doneEl.style.display = 'none';
+        approveBtn.disabled = false;
+        rejectBtn.disabled = false;
+
+        const item = queue[currentIdx];
+        const total = queue.length;
+        const notYet = isNotYet(item);
+        progressBar.style.width = ((currentIdx) / total * 100) + '%';
+        counter.textContent = (currentIdx + 1) + ' of ' + total + ' pending';
+
+        if (notYet) {
+            approveBtn.classList.add('btn-muted');
+            rejectBtn.classList.add('btn-muted');
+        } else {
+            approveBtn.classList.remove('btn-muted');
+            rejectBtn.classList.remove('btn-muted');
+        }
+
+        let html = '<div class="review-meta">';
+        html += '<h3>' + escHtml(item.nanoName) + '</h3>';
+        html += '<code>' + escHtml(item.method) + '</code>';
+        html += '<code>' + escHtml(item.endpoint) + '</code>';
+        html += '</div>';
+        if (item.waitUntilDate) {
+            var wDate = new Date(item.waitUntilDate).toLocaleString();
+            html += '<div class="review-section"><strong>Wait until:</strong> ' + escHtml(wDate);
+            if (notYet) html += ' <span class="badge badge-neutral">not yet</span>';
+            html += '</div>';
+        }
+        if (item.explanation) html += '<div class="review-section"><strong>What:</strong> ' + escHtml(item.explanation) + '</div>';
+        if (item.reasoning) html += '<div class="review-section"><strong>Why:</strong> ' + escHtml(item.reasoning) + '</div>';
+        if (item.requestBody) {
+            html += '<div class="review-params">';
+            html += '<div class="review-params-label">Request Parameters</div>';
+            html += '<pre><code>' + fmtJson(item.requestBody) + '</code></pre>';
+            html += '</div>';
+        }
+        card.innerHTML = html;
+    }
+
+    async function resolve(action) {
+        const item = queue[currentIdx];
+        if (isNotYet(item)) {
+            var wDate = new Date(item.waitUntilDate).toLocaleString();
+            if (!confirm('This action is scheduled for ' + wDate + '. Proceed now anyway?')) return;
+        }
+        approveBtn.disabled = true;
+        rejectBtn.disabled = true;
+
+        try {
+            await fetch('/approvals/' + item.id + '/' + action, { method: 'POST' });
+
+            // Update table row badge
+            const badgeCell = item.row.querySelector('td:nth-child(4)');
+            const actionsCell = item.row.querySelector('td:nth-child(6)');
+            if (action === 'approve') {
+                if (badgeCell) badgeCell.innerHTML = '<span class="badge badge-success">approved</span>';
+            } else {
+                if (badgeCell) badgeCell.innerHTML = '<span class="badge badge-error">rejected</span>';
+            }
+            if (actionsCell) actionsCell.innerHTML = '-';
+            item.row.classList.remove('pending-row');
+
+            // Flash
+            card.classList.remove('review-flash');
+            void card.offsetWidth;
+            card.classList.add('review-flash');
+        } catch(e) {}
+
+        currentIdx++;
+        setTimeout(renderCurrent, 300);
+    }
+
+    reviewBtn.addEventListener('click', function() {
+        buildQueue();
+        if (queue.length === 0) return;
+        currentIdx = 0;
+        renderCurrent();
+        modal.showModal();
+    });
+
+    closeBtn.addEventListener('click', function() { modal.close(); });
+    modal.addEventListener('click', function(e) { if (e.target === modal) modal.close(); });
+
+    approveBtn.addEventListener('click', function() { resolve('approve'); });
+    rejectBtn.addEventListener('click', function() { resolve('reject'); });
+
+    // Confirm prompt for not-yet rows in the table
+    document.querySelectorAll('tr[data-wait-until] .approval-form').forEach(function(form) {
+        form.addEventListener('submit', function(e) {
+            var row = form.closest('tr');
+            var waitStr = row.dataset.waitUntil;
+            if (waitStr && new Date(waitStr) > new Date()) {
+                var wDate = new Date(waitStr).toLocaleString();
+                if (!confirm('This action is scheduled for ' + wDate + '. Proceed now anyway?')) {
+                    e.preventDefault();
+                }
+            }
+        });
+    });
+})();
+</script>
+{% endblock %}

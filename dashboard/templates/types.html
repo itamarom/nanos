@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block title %}Types - Nanos Dashboard{% endblock %}
+{% block content %}
+<h1>Nano Types</h1>
+<p>Types are discovered from <code>/nanos/*/config.yaml</code> on disk.</p>
+
+{% if types %}
+<div class="table-card">
+<table>
+    <thead>
+        <tr>
+            <th>Type</th>
+            <th>Description</th>
+            <th>Default Schedule</th>
+            <th>Permissions</th>
+            <th>Parameters</th>
+            <th>Instances</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for t in types %}
+        <tr class="clickable-row" onclick="window.location='/types/{{ t.type_name }}'">
+            <td><a href="/types/{{ t.type_name }}">{{ t.type_name }}</a></td>
+            <td>{{ t.description[:80] }}{% if t.description|length > 80 %}...{% endif %}</td>
+            <td><code>{{ t.schedule or 'manual' }}</code></td>
+            <td>
+                {% for p in t.permissions %}
+                <code{% if p in SENSITIVE_ENDPOINTS %} class="sensitive" title="Requires approval"{% endif %}>{{ p }}</code>{% if not loop.last %}, {% endif %}
+                {% endfor %}
+            </td>
+            <td>
+                {% if t.parameter_schema %}
+                {{ t.parameter_schema|length }} param{{ 's' if t.parameter_schema|length != 1 else '' }}
+                {% else %}
+                -
+                {% endif %}
+            </td>
+            <td>{{ t.instance_count }}</td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+</div>
+{% else %}
+<p>No types found. Add a directory with <code>config.yaml</code> to <code>/nanos/</code>.</p>
+{% endif %}
+{% endblock %}

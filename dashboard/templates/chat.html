@@ -1,0 +1,1262 @@
+{% extends "base.html" %}
+{% block title %}Chat - Nanos Dashboard{% endblock %}
+{% block content %}
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/styles/github.min.css">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.11.1/highlight.min.js"></script>
+<style>
+/* Code block rendering for show_code_block tool */
+.chat-code-block {
+    align-self: flex-start;
+    width: 70%;
+    min-width: 280px;
+    border: 1px solid var(--gray-300);
+    border-radius: 8px;
+    flex-shrink: 0;
+}
+.chat-code-header {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.4rem 0.75rem;
+    background: var(--gray-100);
+    border-bottom: 1px solid var(--gray-200);
+    font-size: 0.8rem;
+    border-radius: 8px 8px 0 0;
+}
+.chat-code-filename {
+    font-weight: 600;
+    color: var(--gray-700);
+}
+.chat-code-lang {
+    color: var(--gray-400);
+    font-size: 0.75rem;
+}
+.chat-code-copy {
+    margin-left: auto;
+    font-size: 0.7rem;
+    padding: 0.15rem 0.4rem;
+}
+.chat-code-block pre {
+    margin: 0;
+    padding: 0.75rem;
+    overflow-x: auto;
+    font-size: 0.8rem;
+    line-height: 1.5;
+    background: var(--gray-50, #f9fafb);
+    border-radius: 0 0 8px 8px;
+}
+.chat-code-block code {
+    display: block;
+    white-space: pre;
+    font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+}
+/* Nano mode badge */
+.chat-nano-prompt-collapsed {
+    padding: 0.4rem 0.75rem !important;
+    background: var(--gray-100) !important;
+    border: 1px solid var(--gray-200) !important;
+}
+.badge-info {
+    background: var(--blue-100, #dbeafe);
+    color: var(--blue-700, #1d4ed8);
+    font-size: 0.8rem;
+    padding: 0.2rem 0.5rem;
+    border-radius: 4px;
+}
+</style>
+<div class="chat-layout">
+    <!-- Left: Conversation History -->
+    <aside class="chat-sidebar">
+        <div class="chat-sidebar-header">
+            <strong>Conversations</strong>
+            <button type="button" class="btn btn-sm btn-primary" id="new-chat-btn">+ New</button>
+        </div>
+        <div class="chat-history" id="chat-history">
+            {% for c in conversations %}
+            <a href="/chat/{{ c.id }}"
+               class="chat-history-item{% if active_conversation and active_conversation.id == c.id %} active{% endif %}"
+               data-id="{{ c.id }}">
+                <span class="chat-history-title">{{ c.title }}</span>
+                <span class="chat-history-date">{{ c.updated_at.strftime('%b %d') }}</span>
+                <button class="chat-history-delete" data-id="{{ c.id }}" title="Delete">&times;</button>
+            </a>
+            {% endfor %}
+            {% if not conversations %}
+            <p class="text-muted text-sm" style="padding:0.75rem">No conversations yet.</p>
+            {% endif %}
+        </div>
+    </aside>
+
+    <!-- Center: Messages -->
+    <main class="chat-main">
+        <div class="chat-messages" id="chat-messages">
+            {% if not active_conversation %}
+            <div class="chat-empty" id="chat-empty">
+                <h2>Live Chat</h2>
+                <p>Start a conversation with an AI assistant that can call real APIs.</p>
+                <p class="text-sm text-muted">Toggle APIs in the right panel, then type a message.</p>
+            </div>
+            {% endif %}
+            {% for m in messages %}
+            {% if m.role == 'user' and m.content and m.content.startswith('[System: Nano Development Mode]') %}
+            <div class="chat-bubble chat-bubble-user chat-nano-prompt-collapsed" data-msg-id="{{ m.id }}">
+                <span class="badge badge-info">&#9881; Nano mode activated</span>
+            </div>
+            {% elif m.role == 'user' %}
+            <div class="chat-bubble chat-bubble-user" data-msg-id="{{ m.id }}">{{ m.content }}</div>
+            {% elif m.role == 'assistant' and m.tool_calls %}
+            {% if m.content %}<div class="chat-bubble chat-bubble-assistant" data-msg-id="{{ m.id }}">{{ m.content }}</div>{% endif %}
+            {% elif m.role == 'assistant' %}
+            <div class="chat-bubble chat-bubble-assistant" data-msg-id="{{ m.id }}">{{ m.content }}</div>
+            {% elif m.role == 'tool' and m.tool_name == 'show_code_block' %}
+            {% set targs = m.tool_args | tojson_pretty %}
+            <div class="chat-code-block" data-code="{{ m.tool_args }}" data-msg-id="{{ m.id }}">
+                <div class="chat-code-header">
+                    <span class="chat-code-filename">{{ (m.tool_args | string | from_json).filename if m.tool_args else 'code' }}</span>
+                    <span class="chat-code-lang">{{ (m.tool_args | string | from_json).language if m.tool_args else '' }}</span>
+                    <button type="button" class="btn btn-sm chat-code-copy" onclick="navigator.clipboard.writeText(this.closest('.chat-code-block').querySelector('code').textContent).then(()=>{this.textContent='Copied!';setTimeout(()=>this.textContent='Copy',2000)})">Copy</button>
+                </div>
+                <pre><code>{{ (m.tool_args | string | from_json).code if m.tool_args else '' }}</code></pre>
+            </div>
+            {% elif m.role == 'tool' %}
+            {% set wait_iso = approval_wait.get(m.approval_id|string, '') if m.approval_id else '' %}
+            <div class="chat-tool-card chat-tool-{{ m.tool_status or 'executed' }}{% if m.tool_status == 'pending_approval' %} pending{% endif %}" data-msg-id="{{ m.id }}" data-tool-name="{{ m.tool_name or '' }}" data-tool-args='{{ m.tool_args if m.tool_args else "{}" }}'{% if wait_iso %} data-wait-until="{{ wait_iso }}"{% endif %}>
+                <div class="chat-tool-header" onclick="this.parentElement.classList.toggle('collapsed')">
+                    <span class="chat-tool-name">{{ m.tool_name or 'tool' }}</span>
+                    <span class="badge badge-{{ 'success' if m.tool_status in ('executed','approved') else 'error' if m.tool_status in ('rejected','error','blocked') else 'muted' if m.tool_status == 'superseded' else 'warning' }}">{{ m.tool_status or 'executed' }}</span>
+                    <span class="chat-tool-toggle">&#9660;</span>
+                </div>
+                <div class="chat-tool-body">
+                    {% if m.tool_args %}
+                    <div class="chat-tool-section">
+                        <div class="chat-tool-section-label">Request</div>
+                        <pre><code>{{ m.tool_args | tojson_pretty }}</code></pre>
+                    </div>
+                    {% endif %}
+                    {% if m.tool_status == 'pending_approval' and m.approval_id %}
+                    <div class="chat-tool-section">
+                        <div class="chat-tool-section-label">Approval</div>
+                        <div class="chat-approval-actions">
+                            <button type="button" class="btn btn-success btn-sm approve-btn{% if wait_iso %} btn-muted{% endif %}" data-id="{{ m.approval_id }}">Approve</button>
+                            <button type="button" class="btn btn-danger btn-sm reject-btn{% if wait_iso %} btn-muted{% endif %}" data-id="{{ m.approval_id }}">Reject</button>
+                        </div>
+                    </div>
+                    {% elif m.content %}
+                    <div class="chat-tool-section">
+                        <div class="chat-tool-section-label">Response</div>
+                        <pre><code>{{ m.content | tojson_pretty }}</code></pre>
+                    </div>
+                    {% else %}
+                    <p class="text-muted text-sm" style="padding:0.25rem 0">No result data</p>
+                    {% endif %}
+                </div>
+            </div>
+            {% endif %}
+            {% endfor %}
+            <div class="chat-thinking" id="chat-thinking" style="display:none">
+                <span class="thinking-dots"><span></span><span></span><span></span></span>
+            </div>
+        </div>
+        <div class="chat-input-area">
+            <textarea id="chat-input" placeholder="Type a message..." rows="1"></textarea>
+            <button type="button" class="btn btn-secondary btn-sm" id="create-nano-btn" title="Create a nano from this conversation"
+                    style="white-space:nowrap; font-size:0.8rem; padding:0.3rem 0.6rem;">&#9881; Create Nano</button>
+            <button type="button" class="btn btn-primary" id="chat-send-btn">Send</button>
+        </div>
+    </main>
+
+    <!-- Right: Settings -->
+    <aside class="chat-settings">
+        <div class="chat-settings-header"><strong>Settings</strong></div>
+        <div class="chat-settings-body">
+            <label for="model-select">Model</label>
+            <select id="model-select">
+                {% set m = active_conversation.model if active_conversation else 'gpt-5-mini' %}
+                <optgroup label="GPT-5">
+                    <option value="gpt-5-nano"{% if m == 'gpt-5-nano' %} selected{% endif %}>gpt-5-nano</option>
+                    <option value="gpt-5-mini"{% if m == 'gpt-5-mini' %} selected{% endif %}>gpt-5-mini</option>
+                    <option value="gpt-5"{% if m == 'gpt-5' %} selected{% endif %}>gpt-5</option>
+                    <option value="gpt-5-pro"{% if m == 'gpt-5-pro' %} selected{% endif %}>gpt-5-pro</option>
+                    <option value="gpt-5.1"{% if m == 'gpt-5.1' %} selected{% endif %}>gpt-5.1</option>
+                    <option value="gpt-5.2"{% if m == 'gpt-5.2' %} selected{% endif %}>gpt-5.2</option>
+                    <option value="gpt-5.2-pro"{% if m == 'gpt-5.2-pro' %} selected{% endif %}>gpt-5.2-pro</option>
+                </optgroup>
+                <optgroup label="GPT-4.1">
+                    <option value="gpt-4.1-nano"{% if m == 'gpt-4.1-nano' %} selected{% endif %}>gpt-4.1-nano</option>
+                    <option value="gpt-4.1-mini"{% if m == 'gpt-4.1-mini' %} selected{% endif %}>gpt-4.1-mini</option>
+                    <option value="gpt-4.1"{% if m == 'gpt-4.1' %} selected{% endif %}>gpt-4.1</option>
+                </optgroup>
+                <optgroup label="GPT-4o">
+                    <option value="gpt-4o-mini"{% if m == 'gpt-4o-mini' %} selected{% endif %}>gpt-4o-mini</option>
+                    <option value="gpt-4o"{% if m == 'gpt-4o' %} selected{% endif %}>gpt-4o</option>
+                </optgroup>
+                <optgroup label="Reasoning">
+                    <option value="o3-mini"{% if m == 'o3-mini' %} selected{% endif %}>o3-mini</option>
+                    <option value="o4-mini"{% if m == 'o4-mini' %} selected{% endif %}>o4-mini</option>
+                    <option value="o3"{% if m == 'o3' %} selected{% endif %}>o3</option>
+                    <option value="o3-pro"{% if m == 'o3-pro' %} selected{% endif %}>o3-pro</option>
+                    <option value="o4-mini-deep-research"{% if m == 'o4-mini-deep-research' %} selected{% endif %}>o4-mini-deep-research</option>
+                    <option value="o3-deep-research"{% if m == 'o3-deep-research' %} selected{% endif %}>o3-deep-research</option>
+                </optgroup>
+            </select>
+
+            <label style="margin-top:1rem">APIs</label>
+            {% macro ep_checked(ep) %}{% if ep in enabled_apis or ep.rsplit('.',1)[0] in enabled_apis or ep.split('.')[0] in enabled_apis %}checked{% endif %}{% endmacro %}
+            <div class="chat-api-toggles">
+                <div class="chat-api-group" data-group="hubspot">
+                    <label class="chat-api-toggle">
+                        <input type="checkbox" class="api-group-parent">
+                        <span>HubSpot CRM</span>
+                        <button type="button" class="chat-api-group-toggle">&#9660;</button>
+                    </label>
+                    <div class="chat-api-group-children">
+                        {% for ep in ['hubspot.contacts.list','hubspot.contacts.get','hubspot.contacts.create','hubspot.contacts.update','hubspot.contacts.delete','hubspot.contacts.search','hubspot.deals.list','hubspot.deals.get','hubspot.deals.create','hubspot.deals.update','hubspot.deals.delete','hubspot.deals.search','hubspot.tasks.list','hubspot.tasks.get','hubspot.tasks.create','hubspot.tasks.update','hubspot.tasks.delete','hubspot.tasks.search','hubspot.properties.list','hubspot.properties.get'] %}
+                        <label class="chat-api-toggle"><input type="checkbox" value="{{ ep }}" class="api-sub-checkbox" {{ ep_checked(ep) }}><span{% if ep in SENSITIVE_ENDPOINTS %} class="sensitive"{% endif %}>{{ ep }}</span></label>
+                        {% endfor %}
+                    </div>
+                </div>
+                <div class="chat-api-group" data-group="gmail">
+                    <label class="chat-api-toggle">
+                        <input type="checkbox" class="api-group-parent">
+                        <span>Gmail</span>
+                        <button type="button" class="chat-api-group-toggle">&#9660;</button>
+                    </label>
+                    <div class="chat-api-group-children">
+                        {% for ep in ['gmail.messages.list','gmail.messages.get','gmail.threads.get','gmail.messages.send','gmail.messages.reply'] %}
+                        <label class="chat-api-toggle"><input type="checkbox" value="{{ ep }}" class="api-sub-checkbox" {{ ep_checked(ep) }}><span{% if ep in SENSITIVE_ENDPOINTS %} class="sensitive"{% endif %}>{{ ep }}</span></label>
+                        {% endfor %}
+                    </div>
+                </div>
+                <div class="chat-api-group" data-group="calendar">
+                    <label class="chat-api-toggle">
+                        <input type="checkbox" class="api-group-parent">
+                        <span>Google Calendar</span>
+                        <button type="button" class="chat-api-group-toggle">&#9660;</button>
+                    </label>
+                    <div class="chat-api-group-children">
+                        {% for ep in ['calendar.events.list','calendar.events.create','calendar.events.update','calendar.events.delete'] %}
+                        <label class="chat-api-toggle"><input type="checkbox" value="{{ ep }}" class="api-sub-checkbox" {{ ep_checked(ep) }}><span{% if ep in SENSITIVE_ENDPOINTS %} class="sensitive"{% endif %}>{{ ep }}</span></label>
+                        {% endfor %}
+                    </div>
+                </div>
+                <div class="chat-api-group" data-group="whatsapp">
+                    <label class="chat-api-toggle">
+                        <input type="checkbox" class="api-group-parent">
+                        <span>WhatsApp</span>
+                        <button type="button" class="chat-api-group-toggle">&#9660;</button>
+                    </label>
+                    <div class="chat-api-group-children">
+                        {% for ep in ['whatsapp.chats.list','whatsapp.messages.list','whatsapp.messages.search','whatsapp.messages.send_text','whatsapp.messages.send_file','whatsapp.groups.list','whatsapp.media.download','whatsapp.history.backfill'] %}
+                        <label class="chat-api-toggle"><input type="checkbox" value="{{ ep }}" class="api-sub-checkbox" {{ ep_checked(ep) }}><span{% if ep in SENSITIVE_ENDPOINTS %} class="sensitive"{% endif %}>{{ ep }}</span></label>
+                        {% endfor %}
+                    </div>
+                </div>
+                <div class="chat-api-group" data-group="notion">
+                    <label class="chat-api-toggle">
+                        <input type="checkbox" class="api-group-parent">
+                        <span>Notion</span>
+                        <button type="button" class="chat-api-group-toggle">&#9660;</button>
+                    </label>
+                    <div class="chat-api-group-children">
+                        {% for ep in ['notion.search','notion.databases.get','notion.databases.query','notion.pages.get','notion.pages.create','notion.pages.update','notion.pages.delete','notion.blocks.list','notion.blocks.append','notion.blocks.update','notion.blocks.delete','notion.comments.list','notion.comments.create','notion.users.list'] %}
+                        <label class="chat-api-toggle"><input type="checkbox" value="{{ ep }}" class="api-sub-checkbox" {{ ep_checked(ep) }}><span{% if ep in SENSITIVE_ENDPOINTS %} class="sensitive"{% endif %}>{{ ep }}</span></label>
+                        {% endfor %}
+                    </div>
+                </div>
+                <div class="chat-api-group" data-group="linear">
+                    <label class="chat-api-toggle">
+                        <input type="checkbox" class="api-group-parent">
+                        <span>Linear</span>
+                        <button type="button" class="chat-api-group-toggle">&#9660;</button>
+                    </label>
+                    <div class="chat-api-group-children">
+                        {% for ep in ['linear.issues.list','linear.issues.get','linear.issues.create','linear.issues.update','linear.issues.delete','linear.comments.list','linear.comments.create','linear.comments.update','linear.comments.delete','linear.projects.list','linear.projects.get','linear.teams.list','linear.cycles.list','linear.users.list'] %}
+                        <label class="chat-api-toggle"><input type="checkbox" value="{{ ep }}" class="api-sub-checkbox" {{ ep_checked(ep) }}><span{% if ep in SENSITIVE_ENDPOINTS %} class="sensitive"{% endif %}>{{ ep }}</span></label>
+                        {% endfor %}
+                    </div>
+                </div>
+                <div class="chat-api-group" data-group="slack">
+                    <label class="chat-api-toggle">
+                        <input type="checkbox" class="api-group-parent">
+                        <span>Slack</span>
+                        <button type="button" class="chat-api-group-toggle">&#9660;</button>
+                    </label>
+                    <div class="chat-api-group-children">
+                        {% for ep in ['slack.send_message'] %}
+                        <label class="chat-api-toggle"><input type="checkbox" value="{{ ep }}" class="api-sub-checkbox" {{ ep_checked(ep) }}><span{% if ep in SENSITIVE_ENDPOINTS %} class="sensitive"{% endif %}>{{ ep }}</span></label>
+                        {% endfor %}
+                    </div>
+                </div>
+                <div class="chat-api-group" data-group="nanos">
+                    <label class="chat-api-toggle">
+                        <input type="checkbox" class="api-group-parent">
+                        <span>Nanos</span>
+                        <button type="button" class="chat-api-group-toggle">&#9660;</button>
+                    </label>
+                    <div class="chat-api-group-children">
+                        {% for ep in ['nano_types.list','nano_types.get','nano_types.create','nano_types.update','nano_types.delete','nanos.show_code_block','nanos.list','nanos.get','nanos.create','nanos.update','nanos.delete','nanos.run_once','nanos.run_temp','nanos.run_history','nanos.read_log'] %}
+                        <label class="chat-api-toggle"><input type="checkbox" value="{{ ep }}" class="api-sub-checkbox" {{ ep_checked(ep) }}><span{% if ep in SENSITIVE_ENDPOINTS %} class="sensitive"{% endif %}>{{ ep }}</span></label>
+                        {% endfor %}
+                    </div>
+                </div>
+            </div>
+
+            {% if active_conversation %}
+            <div style="margin-top:1.5rem; border-top:1px solid var(--gray-200); padding-top:1rem;">
+                <button type="button" class="btn btn-danger btn-sm" id="delete-chat-btn" style="width:100%">Delete Conversation</button>
+            </div>
+            {% endif %}
+        </div>
+    </aside>
+</div>
+
+<!-- Modal for confirming nano type deletion -->
+<dialog id="delete-type-modal">
+    <div class="modal-content">
+        <div class="modal-header">
+            <h3>Delete Nano Type</h3>
+            <button class="modal-close" onclick="this.closest('dialog').close()">&times;</button>
+        </div>
+        <div class="modal-body">
+            <p>Are you sure you want to delete nano type <strong id="delete-type-name"></strong>?</p>
+            <div id="delete-type-instances" style="display:none">
+                <p style="color:var(--amber-700);font-weight:500;margin-top:0.75rem">This type has registered nano instances:</p>
+                <ul id="delete-type-instance-list" style="margin:0.5rem 0;padding-left:1.5rem"></ul>
+                <p style="font-size:0.85rem;color:var(--gray-600)">These instances must be deleted separately.</p>
+            </div>
+            <div id="delete-type-no-instances" style="display:none">
+                <p style="color:var(--gray-600);margin-top:0.5rem">No registered nano instances reference this type.</p>
+            </div>
+            <div id="delete-type-loading" style="margin-top:0.5rem;color:var(--gray-500)">Loading instances...</div>
+        </div>
+        <div class="modal-footer">
+            <button type="button" class="btn btn-secondary" onclick="this.closest('dialog').close()">Cancel</button>
+            <button type="button" class="btn btn-danger" id="delete-type-confirm" disabled>Delete Type</button>
+        </div>
+    </div>
+</dialog>
+
+<script>
+(function() {
+    const messagesEl = document.getElementById('chat-messages');
+    const inputEl = document.getElementById('chat-input');
+    const sendBtn = document.getElementById('chat-send-btn');
+    let thinkingEl = document.getElementById('chat-thinking');
+    let emptyEl = document.getElementById('chat-empty');
+    const modelSelect = document.getElementById('model-select');
+    const newChatBtn = document.getElementById('new-chat-btn');
+    const deleteChatBtn = document.getElementById('delete-chat-btn');
+    const historyEl = document.getElementById('chat-history');
+    const createNanoBtn = document.getElementById('create-nano-btn');
+
+    let conversationId = {{ ('"%s"' % active_conversation.id) | safe if active_conversation else 'null' }};
+    let conversationStatus = {{ (('"%s"' % active_conversation.status) if active_conversation else '"idle"') | safe }};
+    let sending = false;
+    let currentStreamBubble = null;  // assistant bubble being streamed into
+    let sseAbortController = null;   // AbortController for the active SSE fetch
+
+    // Batch approval tracking
+    var currentBatchApprovalIds = {{ batch_approval_ids | tojson }};
+    var currentBatchId = {{ batch_id | tojson }};
+
+    // -----------------------------------------------------------------------
+    // Sub-API selection helpers
+    // -----------------------------------------------------------------------
+    function getEnabledApis() {
+        var apis = [];
+        document.querySelectorAll('.chat-api-group').forEach(function(group) {
+            var groupName = group.dataset.group;
+            var subs = group.querySelectorAll('.api-sub-checkbox');
+            var checked = Array.from(subs).filter(function(c) { return c.checked; });
+            if (checked.length === subs.length && subs.length > 0) {
+                // All subs checked — collapse to unique prefixes
+                var prefixes = new Set();
+                checked.forEach(function(c) {
+                    var parts = c.value.split('.');
+                    prefixes.add(parts[0]);
+                });
+                prefixes.forEach(function(p) { apis.push(p); });
+            } else {
+                checked.forEach(function(c) { apis.push(c.value); });
+            }
+        });
+        return apis;
+    }
+
+    function getModel() {
+        return modelSelect.value;
+    }
+
+    function escHtml(s) {
+        var d = document.createElement('div');
+        d.textContent = s || '';
+        return d.innerHTML;
+    }
+
+    function fmtJson(s) {
+        try {
+            return escHtml(JSON.stringify(JSON.parse(s), null, 2));
+        } catch(e) { return escHtml(s); }
+    }
+
+    function scrollBottom() {
+        requestAnimationFrame(function() {
+            messagesEl.scrollTop = messagesEl.scrollHeight;
+        });
+    }
+
+    function showThinking(show) {
+        thinkingEl.style.display = show ? '' : 'none';
+        if (show) scrollBottom();
+    }
+
+    function setInputEnabled(enabled) {
+        inputEl.disabled = !enabled;
+        sendBtn.disabled = !enabled;
+    }
+
+    function badgeClass(status) {
+        if (status === 'executed' || status === 'approved') return 'badge-success';
+        if (status === 'rejected' || status === 'error' || status === 'blocked') return 'badge-error';
+        if (status === 'superseded') return 'badge-muted';
+        return 'badge-warning';
+    }
+
+    // Insert element before the thinking indicator so dots stay at the bottom
+    function appendBeforeThinking(el) {
+        messagesEl.insertBefore(el, thinkingEl);
+    }
+
+    function renderMessage(msg) {
+        if (emptyEl) emptyEl.style.display = 'none';
+        var msgId = msg.id || '';
+
+        if (msg.role === 'user') {
+            var content = msg.content || '';
+            // Collapse teaching prompt messages
+            if (content.startsWith('[System: Nano Development Mode]')) {
+                var div = document.createElement('div');
+                div.className = 'chat-bubble chat-bubble-user chat-nano-prompt-collapsed';
+                if (msgId) div.dataset.msgId = msgId;
+                div.innerHTML = '<span class="badge badge-info" style="cursor:pointer" title="Click to expand">&#9881; Nano mode activated</span>';
+                div.querySelector('.badge').addEventListener('click', function() {
+                    var full = div.querySelector('.nano-prompt-full');
+                    if (full) {
+                        full.style.display = full.style.display === 'none' ? 'block' : 'none';
+                    }
+                });
+                var fullDiv = document.createElement('div');
+                fullDiv.className = 'nano-prompt-full';
+                fullDiv.style.display = 'none';
+                fullDiv.style.marginTop = '0.5rem';
+                fullDiv.style.fontSize = '0.75rem';
+                fullDiv.style.opacity = '0.7';
+                fullDiv.style.whiteSpace = 'pre-wrap';
+                fullDiv.textContent = content;
+                div.appendChild(fullDiv);
+                appendBeforeThinking(div);
+                return;
+            }
+            var div = document.createElement('div');
+            div.className = 'chat-bubble chat-bubble-user';
+            if (msgId) div.dataset.msgId = msgId;
+            div.textContent = content;
+            appendBeforeThinking(div);
+
+        } else if (msg.role === 'assistant') {
+            if (msg.tool_calls && !msg.content) return;
+            if (msg.content) {
+                var div = document.createElement('div');
+                div.className = 'chat-bubble chat-bubble-assistant';
+                if (msgId) div.dataset.msgId = msgId;
+                div.textContent = msg.content;
+                appendBeforeThinking(div);
+            }
+
+        } else if (msg.role === 'tool' && msg.tool_name === 'show_code_block') {
+            // Render as a formatted code block instead of a tool card
+            var toolArgs = msg.tool_args;
+            if (typeof toolArgs === 'string') {
+                try { toolArgs = JSON.parse(toolArgs); } catch(e) { toolArgs = {}; }
+            }
+            var filename = toolArgs.filename || 'code';
+            var language = toolArgs.language || 'text';
+            var code = toolArgs.code || '';
+            var block = document.createElement('div');
+            block.className = 'chat-code-block';
+            if (msgId) block.dataset.msgId = msgId;
+            block.innerHTML =
+                '<div class="chat-code-header">' +
+                    '<span class="chat-code-filename">' + escHtml(filename) + '</span>' +
+                    '<span class="chat-code-lang">' + escHtml(language) + '</span>' +
+                    '<button type="button" class="btn btn-sm chat-code-copy">Copy</button>' +
+                '</div>' +
+                '<pre><code class="language-' + escHtml(language) + '"></code></pre>';
+            block.querySelector('code').textContent = code;
+            block.querySelector('.chat-code-copy').addEventListener('click', function() {
+                navigator.clipboard.writeText(code).then(function() {
+                    block.querySelector('.chat-code-copy').textContent = 'Copied!';
+                    setTimeout(function() { block.querySelector('.chat-code-copy').textContent = 'Copy'; }, 2000);
+                });
+            });
+            appendBeforeThinking(block);
+            if (window.hljs) hljs.highlightElement(block.querySelector('code'));
+
+        } else if (msg.role === 'tool') {
+            var card = document.createElement('div');
+            var status = msg.tool_status || 'executed';
+            card.className = 'chat-tool-card chat-tool-' + status;
+            if (msgId) card.dataset.msgId = msgId;
+            card.dataset.approvalId = msg.approval_id || '';
+            card.dataset.toolName = msg.tool_name || '';
+            card.dataset.toolArgs = typeof msg.tool_args === 'string' ? msg.tool_args : JSON.stringify(msg.tool_args || {});
+
+            var argsHtml = '';
+            if (msg.tool_args) {
+                var argsStr = typeof msg.tool_args === 'string' ? msg.tool_args : JSON.stringify(msg.tool_args);
+                argsHtml = '<div class="chat-tool-section"><div class="chat-tool-section-label">Request</div><pre><code>' + fmtJson(argsStr) + '</code></pre></div>';
+            }
+
+            if (status === 'pending_approval' && msg.approval_id) {
+                if (msg.wait_until_date) card.dataset.waitUntil = msg.wait_until_date;
+                var mutedCls = (msg.wait_until_date && new Date(msg.wait_until_date) > new Date()) ? ' btn-muted' : '';
+                card.innerHTML =
+                    '<div class="chat-tool-header">' +
+                        '<span class="chat-tool-name">' + escHtml(msg.tool_name) + '</span>' +
+                        '<span class="badge badge-warning">awaiting approval</span>' +
+                    '</div>' +
+                    '<div class="chat-tool-body">' +
+                        argsHtml +
+                        '<div class="chat-tool-section"><div class="chat-tool-section-label">Approval</div>' +
+                        '<div class="chat-approval-actions">' +
+                            '<button type="button" class="btn btn-success btn-sm approve-btn' + mutedCls + '" data-id="' + escHtml(msg.approval_id) + '">Approve</button>' +
+                            '<button type="button" class="btn btn-danger btn-sm reject-btn' + mutedCls + '" data-id="' + escHtml(msg.approval_id) + '">Reject</button>' +
+                        '</div></div>' +
+                    '</div>';
+                appendBeforeThinking(card);
+                bindApprovalButtons(card);
+                return;
+            }
+
+            // Pending tool (SSE: no content yet)
+            if (status === 'pending' || (!msg.content && status !== 'blocked')) {
+                card.innerHTML =
+                    '<div class="chat-tool-header">' +
+                        '<span class="chat-tool-name">' + escHtml(msg.tool_name) + '</span>' +
+                        '<span class="badge badge-warning">running</span>' +
+                    '</div>' +
+                    '<div class="chat-tool-body">' + argsHtml +
+                        '<p class="text-muted text-sm" style="padding:0.25rem 0">Waiting for result...</p>' +
+                    '</div>';
+                appendBeforeThinking(card);
+                return;
+            }
+
+            var responseHtml = '';
+            if (msg.content) {
+                responseHtml = '<div class="chat-tool-section"><div class="chat-tool-section-label">Response</div><pre><code>' + fmtJson(msg.content) + '</code></pre></div>';
+            } else {
+                responseHtml = '<p class="text-muted text-sm" style="padding:0.25rem 0">No result data</p>';
+            }
+            var bodyContent = argsHtml + responseHtml;
+
+            card.innerHTML =
+                '<div class="chat-tool-header" onclick="this.parentElement.classList.toggle(\'collapsed\')">' +
+                    '<span class="chat-tool-name">' + escHtml(msg.tool_name) + '</span>' +
+                    '<span class="badge ' + badgeClass(status) + '">' + escHtml(status) + '</span>' +
+                    '<span class="chat-tool-toggle">&#9660;</span>' +
+                '</div>' +
+                '<div class="chat-tool-body">' + bodyContent + '</div>';
+            appendBeforeThinking(card);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // SSE: Update an existing tool card with result
+    // -----------------------------------------------------------------------
+    function updateToolCard(msgId, content, toolStatus) {
+        var card = messagesEl.querySelector('.chat-tool-card[data-msg-id="' + msgId + '"]');
+        if (!card) return;
+        // Update badge
+        var badge = card.querySelector('.badge');
+        if (badge) {
+            badge.className = 'badge ' + badgeClass(toolStatus);
+            badge.textContent = toolStatus;
+        }
+        // Update class
+        card.className = 'chat-tool-card chat-tool-' + toolStatus;
+        // Replace body content — keep request section, update response
+        var body = card.querySelector('.chat-tool-body');
+        if (body) {
+            // Keep existing request section
+            var reqSection = body.querySelector('.chat-tool-section');
+            var reqHtml = reqSection ? reqSection.outerHTML : '';
+            var responseHtml = '';
+            if (content) {
+                responseHtml = '<div class="chat-tool-section"><div class="chat-tool-section-label">Response</div><pre><code>' + fmtJson(content) + '</code></pre></div>';
+            } else {
+                responseHtml = '<p class="text-muted text-sm" style="padding:0.25rem 0">No result data</p>';
+            }
+            body.innerHTML = reqHtml + responseHtml;
+        }
+        // Add collapse toggle to header
+        var header = card.querySelector('.chat-tool-header');
+        if (header && !header.querySelector('.chat-tool-toggle')) {
+            header.setAttribute('onclick', "this.parentElement.classList.toggle('collapsed')");
+            header.insertAdjacentHTML('beforeend', '<span class="chat-tool-toggle">&#9660;</span>');
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // SSE streaming
+    // -----------------------------------------------------------------------
+    function parseSSE(block) {
+        var event = 'message', data = '';
+        block.split('\n').forEach(function(line) {
+            if (line.startsWith('event:')) event = line.slice(6).trim();
+            else if (line.startsWith('data:')) data = line.slice(5).trim();
+        });
+        try { data = JSON.parse(data); } catch(e) {}
+        return {event: event, data: data};
+    }
+
+    function handleSSEEvent(evt) {
+        if (evt.event === 'text_delta') {
+            // Incremental LLM text — create or append to streaming bubble
+            if (!currentStreamBubble) {
+                if (emptyEl) emptyEl.style.display = 'none';
+                currentStreamBubble = document.createElement('div');
+                currentStreamBubble.className = 'chat-bubble chat-bubble-assistant';
+                currentStreamBubble.textContent = '';
+                appendBeforeThinking(currentStreamBubble);
+            }
+            currentStreamBubble.textContent += evt.data.content;
+            scrollBottom();
+            return;
+        }
+        if (evt.event === 'message') {
+            // Dedup: skip if message ID already rendered in DOM
+            if (evt.data.id && messagesEl.querySelector('[data-msg-id="' + evt.data.id + '"]')) {
+                if (evt.data.role === 'assistant' && currentStreamBubble) {
+                    // Attach mid-stream: set full content in case early deltas were missed
+                    if (evt.data.content) currentStreamBubble.textContent = evt.data.content;
+                    currentStreamBubble = null;
+                }
+                return;
+            }
+            if (evt.data.role === 'assistant') {
+                if (currentStreamBubble) {
+                    // Replace partial streamed text with full content from DB
+                    if (evt.data.content) currentStreamBubble.textContent = evt.data.content;
+                    if (evt.data.id) currentStreamBubble.dataset.msgId = evt.data.id;
+                    currentStreamBubble = null;
+                    return;
+                }
+            }
+            renderMessage(evt.data);
+        } else if (evt.event === 'tool_update') {
+            updateToolCard(evt.data.id, evt.data.content, evt.data.tool_status);
+        } else if (evt.event === 'done') {
+            currentStreamBubble = null;
+            showThinking(false);
+            if (evt.data.status === 'awaiting_approval') {
+                // Keep input enabled — user can type over approvals
+                setInputEnabled(true);
+                currentBatchApprovalIds = evt.data.approval_ids || [];
+                currentBatchId = evt.data.batch_id || null;
+            } else {
+                setInputEnabled(true);
+                currentBatchApprovalIds = [];
+                currentBatchId = null;
+                inputEl.focus();
+            }
+            conversationStatus = evt.data.status || 'idle';
+            sending = false;
+        }
+        scrollBottom();
+    }
+
+    // Cancel any active SSE fetch — ensures only one consumer per tab
+    function abortActiveSSE() {
+        if (sseAbortController) {
+            sseAbortController.abort();
+            sseAbortController = null;
+        }
+    }
+
+    async function consumeSSE(resp) {
+        var reader = resp.body.getReader();
+        var decoder = new TextDecoder();
+        var buffer = '';
+        try {
+            while (true) {
+                var result = await reader.read();
+                if (result.done) break;
+                buffer += decoder.decode(result.value, {stream: true});
+                while (buffer.indexOf('\n\n') !== -1) {
+                    var idx = buffer.indexOf('\n\n');
+                    var block = buffer.slice(0, idx);
+                    buffer = buffer.slice(idx + 2);
+                    if (block.trim()) {
+                        var evt = parseSSE(block);
+                        handleSSEEvent(evt);
+                    }
+                }
+            }
+            // Handle any remaining data
+            if (buffer.trim()) {
+                var evt = parseSSE(buffer);
+                handleSSEEvent(evt);
+            }
+        } finally {
+            reader.releaseLock();
+        }
+    }
+
+    async function doSendStream(cid, text) {
+        abortActiveSSE();
+        sseAbortController = new AbortController();
+        var streamStarted = false;
+        try {
+            var resp = await fetch('/chat/' + cid + '/send-stream', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    message: text,
+                    model: getModel(),
+                    enabled_apis: getEnabledApis(),
+                }),
+                signal: sseAbortController.signal,
+            });
+            if (!resp.ok) {
+                var err = await resp.json();
+                throw new Error(err.detail || resp.statusText);
+            }
+            streamStarted = true;
+            await consumeSSE(resp);
+            updateSidebarTitle(cid, text);
+        } catch(e) {
+            if (e.name === 'AbortError') return; // cancelled by a newer stream
+            if (streamStarted) {
+                // Mid-stream disconnect — try to re-attach
+                doAttachStream(cid);
+                return;
+            }
+            showThinking(false);
+            renderMessage({role: 'assistant', content: 'Error: ' + e.message});
+            setInputEnabled(true);
+            sending = false;
+        }
+    }
+
+    async function doContinueStream(cid) {
+        abortActiveSSE();
+        sseAbortController = new AbortController();
+        var streamStarted = false;
+        try {
+            var resp = await fetch('/chat/' + cid + '/continue-stream', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                signal: sseAbortController.signal,
+            });
+            if (!resp.ok) {
+                var err = await resp.json();
+                throw new Error(err.detail || resp.statusText);
+            }
+            streamStarted = true;
+            await consumeSSE(resp);
+        } catch(e) {
+            if (e.name === 'AbortError') return; // cancelled by a newer stream
+            if (streamStarted) {
+                // Mid-stream disconnect — try to re-attach
+                doAttachStream(cid);
+                return;
+            }
+            showThinking(false);
+            renderMessage({role: 'assistant', content: 'Error: ' + e.message});
+            setInputEnabled(true);
+            sending = false;
+        }
+    }
+
+    async function doAttachStream(cid) {
+        abortActiveSSE();
+        sseAbortController = new AbortController();
+        showThinking(true);
+        setInputEnabled(false);
+        sending = true;
+        try {
+            var resp = await fetch('/chat/' + cid + '/attach-stream', {
+                signal: sseAbortController.signal,
+            });
+            if (!resp.ok) {
+                throw new Error(resp.statusText);
+            }
+            await consumeSSE(resp);
+            // If consumeSSE finished without a done event (stream ended
+            // before we attached), clean up UI state
+            if (sending) {
+                showThinking(false);
+                setInputEnabled(true);
+                sending = false;
+                // Reload to show the full response from DB
+                window.location.reload();
+            }
+        } catch(e) {
+            if (e.name === 'AbortError') return; // cancelled by a newer stream
+            // Attach failed — reload to get DB state
+            window.location.reload();
+        }
+    }
+
+    // Tab visibility: with the background-task architecture, the agent loop
+    // continues regardless of the client connection. If the fetch dies while
+    // the tab is hidden, the error handler in doSendStream/doContinueStream
+    // will call doAttachStream automatically. No need to intervene here.
+
+    // -----------------------------------------------------------------------
+    // Approval handling
+    // -----------------------------------------------------------------------
+    function isCardNotYet(card) {
+        var w = card.dataset.waitUntil;
+        return w && new Date(w) > new Date();
+    }
+
+    function confirmWaitUntil(card) {
+        if (!isCardNotYet(card)) return true;
+        var wDate = new Date(card.dataset.waitUntil).toLocaleString();
+        return confirm('This action is scheduled for ' + wDate + '. Proceed now anyway?');
+    }
+
+    function bindApprovalButtons(card) {
+        var approveBtn = card.querySelector('.approve-btn');
+        var rejectBtn = card.querySelector('.reject-btn');
+        if (approveBtn) {
+            approveBtn.addEventListener('click', function() {
+                if (!confirmWaitUntil(card)) return;
+                var toolName = card.dataset.toolName;
+                if (toolName === 'delete_nano_type') {
+                    showDeleteTypeModal(this.dataset.id, card);
+                } else {
+                    resolveApproval(this.dataset.id, 'approve', card);
+                }
+            });
+        }
+        if (rejectBtn) {
+            rejectBtn.addEventListener('click', function() {
+                if (!confirmWaitUntil(card)) return;
+                resolveApproval(this.dataset.id, 'reject', card);
+            });
+        }
+    }
+
+    function showDeleteTypeModal(approvalId, card) {
+        var modal = document.getElementById('delete-type-modal');
+        var nameEl = document.getElementById('delete-type-name');
+        var instancesDiv = document.getElementById('delete-type-instances');
+        var noInstancesDiv = document.getElementById('delete-type-no-instances');
+        var loadingDiv = document.getElementById('delete-type-loading');
+        var instanceList = document.getElementById('delete-type-instance-list');
+        var confirmBtn = document.getElementById('delete-type-confirm');
+
+        // Parse tool args to get the type name
+        var toolArgs = {};
+        try { toolArgs = JSON.parse(card.dataset.toolArgs || '{}'); } catch(e) {}
+        var typeName = toolArgs.name || '?';
+        nameEl.textContent = typeName;
+
+        // Reset modal state
+        instancesDiv.style.display = 'none';
+        noInstancesDiv.style.display = 'none';
+        loadingDiv.style.display = '';
+        instanceList.innerHTML = '';
+        confirmBtn.disabled = true;
+
+        modal.showModal();
+
+        // Fetch instances
+        fetch('/chat/nano-type-instances/' + encodeURIComponent(typeName))
+            .then(function(r) { return r.json(); })
+            .then(function(data) {
+                loadingDiv.style.display = 'none';
+                var instances = data.instances || [];
+                if (instances.length > 0) {
+                    instancesDiv.style.display = '';
+                    instances.forEach(function(inst) {
+                        var li = document.createElement('li');
+                        li.textContent = inst.name + (inst.is_active ? ' (active)' : ' (inactive)');
+                        instanceList.appendChild(li);
+                    });
+                } else {
+                    noInstancesDiv.style.display = '';
+                }
+                confirmBtn.disabled = false;
+            })
+            .catch(function() {
+                loadingDiv.textContent = 'Failed to load instances';
+                confirmBtn.disabled = false;
+            });
+
+        // Bind confirm button (remove old listener)
+        var newConfirmBtn = confirmBtn.cloneNode(true);
+        confirmBtn.parentNode.replaceChild(newConfirmBtn, confirmBtn);
+        newConfirmBtn.addEventListener('click', function() {
+            modal.close();
+            resolveApproval(approvalId, 'approve', card);
+        });
+    }
+
+    function resolveApproval(approvalId, action, card) {
+        card.querySelectorAll('button').forEach(function(b) { b.disabled = true; });
+
+        fetch('/approvals/' + approvalId + '/' + action, { method: 'POST' })
+            .then(function() {
+                var badge = card.querySelector('.badge');
+                var actionsDiv = card.querySelector('.chat-approval-actions');
+                if (action === 'approve') {
+                    badge.className = 'badge badge-success';
+                    badge.textContent = 'approved';
+                    card.className = card.className.replace('chat-tool-pending_approval', 'chat-tool-approved');
+                } else {
+                    badge.className = 'badge badge-error';
+                    badge.textContent = 'rejected';
+                    card.className = card.className.replace('chat-tool-pending_approval', 'chat-tool-rejected');
+                }
+                if (actionsDiv) actionsDiv.remove();
+
+                // Remove from batch tracking
+                var idx = currentBatchApprovalIds.indexOf(approvalId);
+                if (idx !== -1) currentBatchApprovalIds.splice(idx, 1);
+
+                // Auto-continue only when ALL approvals in the batch are resolved
+                if (currentBatchApprovalIds.length === 0 && currentBatchId) {
+                    currentBatchId = null;
+                    showThinking(true);
+                    setInputEnabled(false);
+                    return doContinueStream(conversationId);
+                }
+                // Otherwise: more approvals pending, do nothing
+            })
+            .catch(function(e) {
+                showThinking(false);
+                renderMessage({role: 'assistant', content: 'Error: ' + e.message});
+                setInputEnabled(true);
+            });
+    }
+
+    // -----------------------------------------------------------------------
+    // Send message
+    // -----------------------------------------------------------------------
+    function sendMessage() {
+        var text = inputEl.value.trim();
+        if (!text || sending) return;
+        sending = true;
+
+        // Clear batch — user is moving on, old approvals become irrelevant
+        currentBatchApprovalIds = [];
+        currentBatchId = null;
+
+        setInputEnabled(false);
+        inputEl.value = '';
+        inputEl.style.height = 'auto';
+
+        renderMessage({role: 'user', content: text});
+        showThinking(true);
+        scrollBottom();
+
+        if (!conversationId) {
+            fetch('/chat/new', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    model: getModel(),
+                    enabled_apis: getEnabledApis(),
+                }),
+            })
+            .then(function(resp) {
+                if (!resp.ok) return resp.json().then(function(e) { throw new Error(e.detail || resp.statusText); });
+                return resp.json();
+            })
+            .then(function(newData) {
+                conversationId = newData.id;
+                history.replaceState(null, '', '/chat/' + conversationId);
+                doSendStream(conversationId, text);
+            })
+            .catch(function(e) {
+                showThinking(false);
+                renderMessage({role: 'assistant', content: 'Error creating conversation: ' + e.message});
+                setInputEnabled(true);
+                sending = false;
+            });
+        } else {
+            doSendStream(conversationId, text);
+        }
+    }
+
+    function updateSidebarTitle(id, firstMsg) {
+        var item = document.querySelector('.chat-history-item[data-id="' + id + '"]');
+        if (item) {
+            var titleEl = item.querySelector('.chat-history-title');
+            if (titleEl && titleEl.textContent === 'New Chat') {
+                titleEl.textContent = firstMsg.substring(0, 50) + (firstMsg.length > 50 ? '...' : '');
+            }
+        } else {
+            var a = document.createElement('a');
+            a.href = '/chat/' + id;
+            a.className = 'chat-history-item active';
+            a.dataset.id = id;
+            a.innerHTML = '<span class="chat-history-title">' + escHtml(firstMsg.substring(0, 50)) + (firstMsg.length > 50 ? '...' : '') + '</span>' +
+                          '<span class="chat-history-date">now</span>' +
+                          '<button class="chat-history-delete" data-id="' + escHtml(id) + '" title="Delete">&times;</button>';
+            historyEl.insertBefore(a, historyEl.firstChild);
+            var noConv = historyEl.querySelector('p');
+            if (noConv) noConv.remove();
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Event listeners
+    // -----------------------------------------------------------------------
+    inputEl.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault();
+            sendMessage();
+        }
+    });
+    sendBtn.addEventListener('click', function(e) {
+        e.preventDefault();
+        sendMessage();
+    });
+
+    // Create Nano button
+    createNanoBtn.addEventListener('click', function() {
+        if (sending || conversationStatus === 'awaiting_approval') return;
+
+        // Auto-enable nanos API group if not already
+        var nanosGroup = document.querySelector('.chat-api-group[data-group="nanos"]');
+        if (nanosGroup) {
+            var subs = nanosGroup.querySelectorAll('.api-sub-checkbox');
+            var anyChecked = Array.from(subs).some(function(c) { return c.checked; });
+            if (!anyChecked) {
+                var parent = nanosGroup.querySelector('.api-group-parent');
+                parent.checked = true;
+                parent.indeterminate = false;
+                subs.forEach(function(c) { c.checked = true; });
+                var children = nanosGroup.querySelector('.chat-api-group-children');
+                var toggle = nanosGroup.querySelector('.chat-api-group-toggle');
+                if (children && children.classList.contains('collapsed')) {
+                    children.classList.remove('collapsed');
+                    if (toggle) toggle.classList.remove('collapsed');
+                }
+            }
+        }
+
+        // Fetch the teaching prompt and send it
+        sending = true;
+        setInputEnabled(false);
+        createNanoBtn.disabled = true;
+
+        // Build the prompt URL — use conversation-specific if we have one
+        var promptUrl = conversationId ? '/chat/' + conversationId + '/nano-prompt' : '/chat/nano-prompt';
+
+        // If no conversation yet, create one first, then fetch prompt
+        if (!conversationId) {
+            fetch('/chat/new', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    model: getModel(),
+                    enabled_apis: getEnabledApis(),
+                }),
+            })
+            .then(function(resp) {
+                if (!resp.ok) return resp.json().then(function(e) { throw new Error(e.detail); });
+                return resp.json();
+            })
+            .then(function(newData) {
+                conversationId = newData.id;
+                history.replaceState(null, '', '/chat/' + conversationId);
+                return fetch('/chat/' + conversationId + '/nano-prompt');
+            })
+            .then(function(resp) { return resp.json(); })
+            .then(function(data) {
+                var text = data.prompt;
+                renderMessage({role: 'user', content: text});
+                showThinking(true);
+                scrollBottom();
+                doSendStream(conversationId, text);
+                createNanoBtn.disabled = false;
+            })
+            .catch(function(e) {
+                renderMessage({role: 'assistant', content: 'Error: ' + e.message});
+                setInputEnabled(true);
+                sending = false;
+                createNanoBtn.disabled = false;
+            });
+        } else {
+            fetch(promptUrl)
+                .then(function(resp) { return resp.json(); })
+                .then(function(data) {
+                    var text = data.prompt;
+                    renderMessage({role: 'user', content: text});
+                    showThinking(true);
+                    scrollBottom();
+                    doSendStream(conversationId, text);
+                    createNanoBtn.disabled = false;
+                })
+                .catch(function(e) {
+                    renderMessage({role: 'assistant', content: 'Error: ' + e.message});
+                    setInputEnabled(true);
+                    sending = false;
+                    createNanoBtn.disabled = false;
+                });
+        }
+    });
+
+    inputEl.addEventListener('input', function() {
+        this.style.height = 'auto';
+        this.style.height = Math.min(this.scrollHeight, 150) + 'px';
+    });
+
+    // New chat
+    newChatBtn.addEventListener('click', function() {
+        conversationId = null;
+        conversationStatus = 'idle';
+        sending = false;
+        messagesEl.innerHTML = '<div class="chat-empty" id="chat-empty"><h2>Live Chat</h2><p>Start a conversation with an AI assistant that can call real APIs.</p><p class="text-sm text-muted">Toggle APIs in the right panel, then type a message.</p></div>' +
+            '<div class="chat-thinking" id="chat-thinking" style="display:none"><span class="thinking-dots"><span></span><span></span><span></span></span></div>';
+        // Re-grab references after innerHTML reset
+        thinkingEl = document.getElementById('chat-thinking');
+        emptyEl = document.getElementById('chat-empty');
+        showThinking(false);
+        setInputEnabled(true);
+        inputEl.value = '';
+        inputEl.style.height = 'auto';
+        history.pushState(null, '', '/chat');
+        document.querySelectorAll('.chat-history-item.active').forEach(function(el) { el.classList.remove('active'); });
+        if (deleteChatBtn) deleteChatBtn.style.display = 'none';
+        inputEl.focus();
+    });
+
+    // Delete chat — settings panel button
+    if (deleteChatBtn) {
+        deleteChatBtn.addEventListener('click', function() {
+            if (!confirm('Delete this conversation?')) return;
+            fetch('/chat/' + conversationId, { method: 'DELETE' })
+                .then(function() { window.location.href = '/chat'; });
+        });
+    }
+
+    // Delete chat — sidebar × buttons (event delegation)
+    historyEl.addEventListener('click', function(e) {
+        var delBtn = e.target.closest('.chat-history-delete');
+        if (!delBtn) return;
+        e.preventDefault();
+        e.stopPropagation();
+        var deleteId = delBtn.dataset.id;
+        if (!confirm('Delete this conversation?')) return;
+        fetch('/chat/' + deleteId, { method: 'DELETE' })
+            .then(function() {
+                var item = historyEl.querySelector('.chat-history-item[data-id="' + deleteId + '"]');
+                if (item) item.remove();
+                if (conversationId === deleteId) {
+                    window.location.href = '/chat';
+                }
+            });
+    });
+
+    // -----------------------------------------------------------------------
+    // Generic API group toggle logic (parent ↔ children sync)
+    // -----------------------------------------------------------------------
+    function settingsChanged() {
+        if (!conversationId) return;
+        fetch('/chat/' + conversationId, {
+            method: 'PATCH',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                model: getModel(),
+                enabled_apis: getEnabledApis(),
+            }),
+        });
+    }
+
+    document.querySelectorAll('.chat-api-group').forEach(function(group) {
+        var parent = group.querySelector('.api-group-parent');
+        var subs = group.querySelectorAll('.api-sub-checkbox');
+        var toggle = group.querySelector('.chat-api-group-toggle');
+        var children = group.querySelector('.chat-api-group-children');
+
+        function syncParent() {
+            var checked = Array.from(subs).filter(function(c) { return c.checked; }).length;
+            parent.checked = checked > 0;
+            parent.indeterminate = checked > 0 && checked < subs.length;
+            settingsChanged();
+        }
+
+        parent.addEventListener('change', function() {
+            var val = this.checked;
+            subs.forEach(function(c) { c.checked = val; });
+            this.indeterminate = false;
+            if (val && children.classList.contains('collapsed')) {
+                children.classList.remove('collapsed');
+                if (toggle) toggle.classList.remove('collapsed');
+            }
+            settingsChanged();
+        });
+
+        subs.forEach(function(c) { c.addEventListener('change', syncParent); });
+
+        if (toggle) {
+            toggle.addEventListener('click', function(e) {
+                e.stopPropagation();
+                e.preventDefault();
+                children.classList.toggle('collapsed');
+                this.classList.toggle('collapsed');
+            });
+        }
+
+        syncParent();
+
+        // Start collapsed unless some children are checked
+        var anyChecked = Array.from(subs).some(function(c) { return c.checked; });
+        if (!anyChecked) {
+            children.classList.add('collapsed');
+            if (toggle) toggle.classList.add('collapsed');
+        }
+    });
+
+    modelSelect.addEventListener('change', settingsChanged);
+
+    // Scroll to bottom on load
+    scrollBottom();
+
+    // Bind approval buttons on page load
+    document.querySelectorAll('.chat-tool-card').forEach(function(card) {
+        bindApprovalButtons(card);
+    });
+
+    // Syntax-highlight server-rendered code blocks
+    if (window.hljs) {
+        document.querySelectorAll('.chat-code-block code').forEach(function(el) {
+            hljs.highlightElement(el);
+        });
+    }
+
+    if (conversationStatus === 'awaiting_approval') {
+        // Keep input enabled — user can type over approvals
+        setInputEnabled(true);
+    } else if (conversationStatus === 'running') {
+        // Page was refreshed mid-stream — auto-attach to running stream
+        conversationStatus = 'running';
+    }
+
+    // Auto-attach on page load if the conversation has a running stream
+    var needsAttach = {{ 'true' if needs_attach is defined and needs_attach else 'false' }};
+    if (needsAttach && conversationId) {
+        doAttachStream(conversationId);
+    }
+
+    inputEl.focus();
+})();
+</script>
+{% endblock %}

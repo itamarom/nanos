@@ -1,0 +1,110 @@
+{% extends "base.html" %}
+{% block title %}Nanos - Nanos Dashboard{% endblock %}
+{% block content %}
+<div style="display:flex; align-items:center; justify-content:space-between">
+    <h1>Nanos</h1>
+    <div style="display:flex; gap:0.5rem">
+        <button class="btn btn-secondary btn-sm" onclick="exportNanos()">Export</button>
+        <label class="btn btn-secondary btn-sm" style="cursor:pointer; margin:0">
+            Import
+            <input type="file" accept=".json" onchange="importNanos(this)" hidden>
+        </label>
+    </div>
+</div>
+
+{% if nanos %}
+<div class="table-card">
+<table>
+    <thead>
+        <tr>
+            <th>Name</th>
+            <th>Type</th>
+            <th>Status</th>
+            <th>Schedule</th>
+            <th>Permissions</th>
+            <th>Created</th>
+            <th></th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for nano in nanos %}
+        <tr class="clickable-row" onclick="window.location='/nanos/{{ nano.name }}'">
+            <td><a href="/nanos/{{ nano.name }}">{{ nano.name }}</a></td>
+            <td>{% if nano.type_name %}<a href="/types/{{ nano.type_name }}" onclick="event.stopPropagation()">{{ nano.type_name }}</a>{% else %}-{% endif %}</td>
+            <td>
+                <form method="post" action="/nanos/{{ nano.name }}/toggle" style="display:inline" onclick="event.stopPropagation()">
+                    <input type="hidden" name="redirect" value="/nanos">
+                    {% if nano.is_active %}
+                    <button type="submit" class="toggle-btn toggle-enable" title="Click to disable">active</button>
+                    {% else %}
+                    <button type="submit" class="toggle-btn toggle-disable" title="Click to enable">inactive</button>
+                    {% endif %}
+                </form>
+            </td>
+            <td><code>{{ nano.schedule or 'manual' }}</code></td>
+            <td>
+                {% for p in nano.permissions %}
+                <code{% if p.endpoint in SENSITIVE_ENDPOINTS %} class="sensitive" title="Requires approval"{% endif %}>{{ p.endpoint }}</code>{% if not loop.last %}, {% endif %}
+                {% endfor %}
+            </td>
+            <td>{{ nano.created_at.strftime('%Y-%m-%d') }}</td>
+            <td onclick="event.stopPropagation()">
+                <form method="post" action="/nanos/{{ nano.name }}/run" style="display:inline">
+                    <button type="submit" class="btn btn-primary btn-sm">Run</button>
+                </form>
+            </td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+</div>
+{% else %}
+<p>No nanos registered. Use <code>cli.py create-nano</code> to register one.</p>
+{% endif %}
+
+<script>
+async function exportNanos() {
+    try {
+        const resp = await fetch('/nanos/export');
+        if (!resp.ok) { alert('Export failed'); return; }
+        const data = await resp.json();
+        const blob = new Blob([JSON.stringify(data, null, 2)], {type: 'application/json'});
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'nanos-export.json';
+        a.click();
+        URL.revokeObjectURL(url);
+    } catch (err) {
+        alert('Export error: ' + err.message);
+    }
+}
+
+async function importNanos(input) {
+    const file = input.files[0];
+    if (!file) return;
+    input.value = '';
+
+    const fd = new FormData();
+    fd.append('file', file);
+
+    try {
+        const resp = await fetch('/nanos/import', {method: 'POST', body: fd});
+        const data = await resp.json();
+        if (data.success) {
+            const parts = [];
+            if (data.imported > 0) parts.push(`${data.imported} nano(s) imported successfully`);
+            if (data.skipped && data.skipped.length > 0) {
+                parts.push(`${data.skipped.length} skipped (already exist: ${data.skipped.join(', ')})`);
+            }
+            alert(parts.join('\n') || 'Nothing to import');
+            if (data.imported > 0) location.reload();
+        } else {
+            alert('Import failed: ' + (data.error || 'Unknown error'));
+        }
+    } catch (err) {
+        alert('Import error: ' + err.message);
+    }
+}
+</script>
+{% endblock %}

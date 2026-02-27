@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}Nanos Dashboard{% endblock %}</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <aside class="sidebar">
+        <div class="sidebar-brand">Nanos</div>
+        <ul class="sidebar-nav">
+            <li><a href="/" {% if request.url.path == '/' %}class="active"{% endif %}>
+                <span class="nav-icon">&#9671;</span> Overview
+            </a></li>
+            <li><a href="/apis" {% if request.url.path.startswith('/apis') %}class="active"{% endif %}>
+                <span class="nav-icon">&#9883;</span> APIs
+            </a></li>
+            <li><a href="/types" {% if request.url.path.startswith('/types') %}class="active"{% endif %}>
+                <span class="nav-icon">&#9830;</span> Types
+            </a></li>
+            <li><a href="/nanos" {% if request.url.path.startswith('/nanos') %}class="active"{% endif %}>
+                <span class="nav-icon">&#9881;</span> Nanos
+            </a></li>
+            <li><a href="/logs" {% if request.url.path.startswith('/logs') or request.url.path.startswith('/runs') %}class="active"{% endif %}>
+                <span class="nav-icon">&#9776;</span> Logs
+            </a></li>
+            <li><a href="/approvals" {% if request.url.path.startswith('/approvals') %}class="active"{% endif %}>
+                <span class="nav-icon">&#10003;</span> Approvals
+            </a></li>
+            <li><a href="/chat" {% if request.url.path.startswith('/chat') %}class="active"{% endif %}>
+                <span class="nav-icon">&#9993;</span> Chat
+            </a></li>
+        </ul>
+    </aside>
+    <div class="main-content">
+        {% block content %}{% endblock %}
+        <footer class="site-footer">
+            <small>Nanos Framework</small>
+        </footer>
+    </div>
+</body>
+</html>

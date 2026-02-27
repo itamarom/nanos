@@ -1,0 +1,49 @@
+{% extends "base.html" %}
+{% block title %}Run Logs - Nanos Dashboard{% endblock %}
+{% block content %}
+<h1>Run Logs</h1>
+
+{% if runs %}
+<div class="table-card">
+<table>
+    <thead>
+        <tr>
+            <th>Nano</th>
+            <th>Trigger</th>
+            <th>Started</th>
+            <th>Finished</th>
+            <th>Status</th>
+            <th>Exit Code</th>
+        </tr>
+    </thead>
+    <tbody>
+        {% for run in runs %}
+        <tr class="clickable-row" onclick="window.location='/runs/{{ run.id }}'">
+            <td><a href="/nanos/{{ run.nano.name }}">{{ run.nano.name }}</a></td>
+            <td>{{ run.trigger }}</td>
+            <td>{{ run.started_at.strftime('%Y-%m-%d %H:%M:%S') }}</td>
+            <td>{{ run.finished_at.strftime('%H:%M:%S') if run.finished_at else '-' }}</td>
+            <td>
+                {% if run.status == 'success' %}
+                <span class="badge badge-success">success</span>
+                {% elif run.status == 'error' %}
+                <span class="badge badge-error">error</span>
+                {% elif run.status == 'awaiting_approval' %}
+                <span class="badge badge-warning">awaiting approval</span>
+                {% else %}
+                <span class="badge badge-running">running</span>
+                {% endif %}
+                {% if run.draft_mode %}
+                <span class="badge badge-draft" style="background:#6b7280;color:#fff;font-size:0.7rem;margin-left:0.25rem">draft</span>
+                {% endif %}
+            </td>
+            <td>{{ run.exit_code if run.exit_code is not none else '-' }}</td>
+        </tr>
+        {% endfor %}
+    </tbody>
+</table>
+</div>
+{% else %}
+<p>No runs logged yet.</p>
+{% endif %}
+{% endblock %}

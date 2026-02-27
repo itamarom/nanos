@@ -1,0 +1,566 @@
+{% extends "base.html" %}
+{% block title %}API Catalog - Nanos Dashboard{% endblock %}
+{% block content %}
+<div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:1rem">
+    <h1 style="margin:0">API Catalog</h1>
+    <div style="display:flex; gap:0.5rem">
+        <button class="btn btn-secondary btn-sm" onclick="exportCredentials()">Export</button>
+        <button class="btn btn-secondary btn-sm" onclick="document.getElementById('import-file').click()">Import</button>
+        <input type="file" id="import-file" accept=".json" style="display:none" onchange="importCredentials(this)">
+    </div>
+</div>
+
+{% for api in apis %}
+<div class="card" style="margin-bottom:1rem">
+    <div style="display:flex; align-items:center; gap:0.75rem; margin-bottom:0.75rem; flex-wrap:wrap">
+        <strong style="font-size:1rem">{{ api.label }}</strong>
+        {% if api.auth_type == "qr" %}
+            {% if api.wa_sync_status == "syncing" %}
+            <span class="badge badge-warning" id="wa-card-badge">syncing...</span>
+            {% elif api.configured %}
+            <span class="badge badge-success" id="wa-card-badge">configured</span>
+            {% else %}
+            <span class="badge badge-error" id="wa-card-badge">not configured</span>
+            {% endif %}
+        {% elif api.configured %}
+        <span class="badge badge-success">configured</span>
+        {% if api.updated_at %}
+        <small class="text-muted">updated {{ api.updated_at.strftime('%Y-%m-%d %H:%M') }}</small>
+        {% endif %}
+        {% else %}
+        <span class="badge badge-error">not configured</span>
+        {% endif %}
+    </div>
+
+    {% if api.endpoints %}
+    <p style="margin-bottom:0.5rem"><strong style="font-size:0.8rem; color:var(--gray-500)">Endpoints:</strong>
+        {% for ep in api.endpoints %}
+        <code{% if ep in SENSITIVE_ENDPOINTS %} class="sensitive" title="Requires approval"{% endif %}>{{ ep }}</code>{% if not loop.last %}, {% endif %}
+        {% endfor %}
+    </p>
+    {% else %}
+    <p><small class="text-muted">Internal service</small></p>
+    {% endif %}
+
+    <div class="api-actions" {% if api.auth_type == "qr" %}id="wa-card-actions"{% endif %}>
+        {% if api.auth_type == "qr" %}
+            {% if api.wa_sync_status == "syncing" %}
+            <button class="btn btn-secondary btn-sm" disabled>Syncing...</button>
+            {% elif api.configured %}
+            {% if api.test_name %}
+            <button class="btn btn-secondary btn-sm" onclick="testApi('{{ api.name }}', this)">Test Connection</button>
+            {% endif %}
+            <form method="post" action="/apis/whatsapp/auth-logout" style="display:inline"
+                  onsubmit="return confirm('Disconnect WhatsApp?')">
+                <button type="submit" class="btn btn-danger btn-sm">Disconnect</button>
+            </form>
+            {% else %}
+            <button class="btn btn-primary btn-sm" onclick="document.getElementById('modal-{{ api.name }}').showModal()">Authenticate</button>
+            {% endif %}
+        {% elif api.configured %}
+        <button class="btn btn-primary btn-sm" onclick="document.getElementById('modal-{{ api.name }}').showModal()">Update Credentials</button>
+        {% if api.test_name %}
+        <button class="btn btn-secondary btn-sm" onclick="testApi('{{ api.name }}', this)">Test Connection</button>
+        {% endif %}
+        <form method="post" action="/apis/{{ api.name }}/delete" style="display:inline"
+              onsubmit="return confirm('Remove credentials for {{ api.label }}?')">
+            <button type="submit" class="btn btn-danger btn-sm">Remove</button>
+        </form>
+        {% else %}
+        <button class="btn btn-primary btn-sm" onclick="document.getElementById('modal-{{ api.name }}').showModal()">Configure</button>
+        {% endif %}
+        <button class="btn-icon" onclick="document.getElementById('help-{{ api.name }}').showModal()">?</button>
+    </div>
+</div>
+
+<!-- Configure / Update modal -->
+<dialog id="modal-{{ api.name }}">
+    <div class="modal-content">
+        <div class="modal-header">
+            <h3>{% if api.auth_type == "qr" %}Authenticate {{ api.label }}{% elif api.configured %}Update {{ api.label }}{% else %}Configure {{ api.label }}{% endif %}</h3>
+            <button class="modal-close" onclick="{% if api.auth_type == 'qr' %}closeWhatsAppAuth(){% else %}this.closest('dialog').close(){% endif %}">&times;</button>
+        </div>
+        {% if api.auth_type == "qr" %}
+        <!-- WhatsApp QR code auth flow -->
+        <div class="modal-body">
+            <canvas id="wa-qr" style="display:none; margin:0 auto 0.75rem; border-radius:4px; image-rendering:pixelated"></canvas>
+            <div id="wa-log" style="background:var(--gray-50); border:1px solid var(--gray-200); border-radius:4px; padding:0.5rem 0.75rem; font-family:'SF Mono','Cascadia Code','Consolas',monospace; font-size:0.75rem; max-height:120px; overflow-y:auto; margin-bottom:0.75rem; color:var(--gray-600)">Click "Start Authentication" to begin.</div>
+            <div id="wa-result" class="test-result" style="display:none"></div>
+        </div>
+        <div class="modal-footer">
+            <button type="button" class="btn btn-secondary" onclick="closeWhatsAppAuth()">Cancel</button>
+            <button type="button" class="btn btn-primary" id="wa-start-btn" onclick="startWhatsAppAuth()">Start Authentication</button>
+        </div>
+        {% elif api.oauth %}
+        <!-- Google OAuth: two-step flow -->
+        <div id="oauth-step1-{{ api.name }}">
+            <div class="modal-body">
+                <label>OAuth2 Client ID</label>
+                <input type="text" id="oauth-client-id-{{ api.name }}" placeholder="...apps.googleusercontent.com"
+                       autocomplete="off" {% if not api.configured %}required{% endif %}>
+                <label>OAuth2 Client Secret</label>
+                <input type="password" id="oauth-client-secret-{{ api.name }}" placeholder="GOCSPX-..."
+                       autocomplete="off" {% if not api.configured %}required{% endif %}>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" onclick="this.closest('dialog').close()">Cancel</button>
+                <button type="button" class="btn btn-primary" onclick="startOAuth('{{ api.name }}')">Authorize with Google</button>
+            </div>
+        </div>
+        <div id="oauth-step2-{{ api.name }}" style="display:none">
+            <div class="modal-body">
+                <p style="margin-bottom:0.75rem">A new tab opened for Google sign-in. After authorizing, you'll be redirected to a page that
+                <strong>won't load</strong> (that's expected). Copy the <strong>entire URL</strong> from your
+                browser's address bar and paste it below.</p>
+                <label>Redirect URL</label>
+                <input type="text" id="oauth-code-{{ api.name }}" placeholder="http://localhost?code=4/0A..." autocomplete="off">
+                <div id="result-{{ api.name }}" class="test-result" style="display:none"></div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" onclick="resetOAuth('{{ api.name }}')">Back</button>
+                <button type="button" class="btn btn-primary" id="oauth-submit-{{ api.name }}" onclick="exchangeOAuth('{{ api.name }}')">Complete Setup</button>
+            </div>
+        </div>
+        {% else %}
+        <!-- Standard API: save via JS and show test results -->
+        <form id="form-{{ api.name }}" onsubmit="return submitCreds(event, '{{ api.name }}')">
+            <div class="modal-body">
+                {% for field in api.fields %}
+                <label>{{ field.label }}</label>
+                <input type="password" name="{{ field.key }}" placeholder="{{ field.placeholder }}"
+                       autocomplete="off" {% if not api.configured %}required{% endif %}>
+                {% endfor %}
+                <div id="result-{{ api.name }}" class="test-result" style="display:none"></div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" onclick="this.closest('dialog').close()">Cancel</button>
+                <button type="submit" class="btn btn-primary" id="submit-{{ api.name }}">Save &amp; Test</button>
+            </div>
+        </form>
+        {% endif %}
+    </div>
+</dialog>
+
+<!-- Help modal -->
+<dialog id="help-{{ api.name }}">
+    <div class="modal-content">
+        <div class="modal-header">
+            <h3>How to set up {{ api.label }}</h3>
+            <button class="modal-close" onclick="this.closest('dialog').close()">&times;</button>
+        </div>
+        <div class="help-body">
+            {{ api.help|safe }}
+        </div>
+        <div class="modal-footer">
+            <button class="btn btn-secondary" onclick="this.closest('dialog').close()">Close</button>
+        </div>
+    </div>
+</dialog>
+{% endfor %}
+
+<script>
+/* --- Google OAuth two-step flow --- */
+async function startOAuth(apiName) {
+    const clientId = document.getElementById('oauth-client-id-' + apiName).value.trim();
+    const clientSecret = document.getElementById('oauth-client-secret-' + apiName).value.trim();
+    if (!clientId || !clientSecret) { alert('Please enter both Client ID and Client Secret.'); return; }
+
+    // Get the authorization URL from the backend
+    const fd = new FormData();
+    fd.append('client_id', clientId);
+    const resp = await fetch('/apis/' + apiName + '/oauth-url', {method: 'POST', body: fd});
+    const data = await resp.json();
+    if (data.error) { alert(data.error); return; }
+
+    // Open Google consent in a new tab
+    window.open(data.url, '_blank');
+
+    // Show step 2
+    document.getElementById('oauth-step1-' + apiName).style.display = 'none';
+    document.getElementById('oauth-step2-' + apiName).style.display = 'block';
+}
+
+function resetOAuth(apiName) {
+    document.getElementById('oauth-step1-' + apiName).style.display = 'block';
+    document.getElementById('oauth-step2-' + apiName).style.display = 'none';
+    const resultDiv = document.getElementById('result-' + apiName);
+    if (resultDiv) resultDiv.style.display = 'none';
+}
+
+async function exchangeOAuth(apiName) {
+    const clientId = document.getElementById('oauth-client-id-' + apiName).value.trim();
+    const clientSecret = document.getElementById('oauth-client-secret-' + apiName).value.trim();
+    const codeInput = document.getElementById('oauth-code-' + apiName).value.trim();
+    const resultDiv = document.getElementById('result-' + apiName);
+    const btn = document.getElementById('oauth-submit-' + apiName);
+
+    if (!codeInput) { alert('Please paste the redirect URL.'); return; }
+
+    btn.disabled = true;
+    btn.textContent = 'Exchanging...';
+    resultDiv.style.display = 'none';
+
+    try {
+        const fd = new FormData();
+        fd.append('client_id', clientId);
+        fd.append('client_secret', clientSecret);
+        fd.append('code', codeInput);
+
+        const resp = await fetch('/apis/' + apiName + '/oauth-exchange', {method: 'POST', body: fd});
+        const data = await resp.json();
+        resultDiv.style.display = 'block';
+
+        if (data.success) {
+            const tests = data.tests || [];
+            const details = tests.map(t =>
+                (t.success ? '\u2705' : '\u274c') + ' ' + (t.name || '') + ': ' + (t.detail || t.error || '')
+            ).join('<br>');
+            resultDiv.className = 'test-result test-ok';
+            resultDiv.innerHTML = '<strong>Authorized and saved!</strong>' +
+                (details ? '<br>' + details : '');
+            setTimeout(() => location.reload(), 2000);
+        } else {
+            resultDiv.className = 'test-result test-fail';
+            resultDiv.innerHTML = '<strong>Error:</strong> ' + (data.error || 'Unknown error');
+        }
+    } catch (err) {
+        resultDiv.style.display = 'block';
+        resultDiv.className = 'test-result test-fail';
+        resultDiv.innerHTML = '<strong>Error:</strong> ' + err.message;
+    } finally {
+        btn.disabled = false;
+        btn.textContent = 'Complete Setup';
+    }
+}
+
+/* --- Standard credential save & test --- */
+async function submitCreds(e, apiName) {
+    e.preventDefault();
+    const form = document.getElementById('form-' + apiName);
+    const btn = document.getElementById('submit-' + apiName);
+    const resultDiv = document.getElementById('result-' + apiName);
+
+    btn.disabled = true;
+    btn.textContent = 'Saving & testing...';
+    resultDiv.style.display = 'none';
+
+    try {
+        const resp = await fetch('/apis/' + apiName + '/configure', {
+            method: 'POST',
+            body: new FormData(form),
+        });
+        const data = await resp.json();
+        resultDiv.style.display = 'block';
+
+        if (data.success) {
+            const tests = data.tests || [];
+            const details = tests.map(t =>
+                (t.success ? '\u2705' : '\u274c') + ' ' + (t.name || '') + ': ' + (t.detail || t.error || '')
+            ).join('<br>');
+            resultDiv.className = 'test-result test-ok';
+            resultDiv.innerHTML = '<strong>Credentials saved.</strong>' +
+                (details ? '<br>' + details : '') +
+                (data.warning ? '<br>\u26a0\ufe0f ' + data.warning : '');
+            setTimeout(() => location.reload(), 2000);
+        } else {
+            resultDiv.className = 'test-result test-fail';
+            const tests = data.tests || [];
+            const details = tests.map(t =>
+                (t.success ? '\u2705' : '\u274c') + ' ' + (t.name || '') + ': ' + (t.detail || t.error || '')
+            ).join('<br>');
+            resultDiv.innerHTML = '<strong>Credentials saved but test failed:</strong>' +
+                (details ? '<br>' + details : '') +
+                (data.error ? '<br>' + data.error : '');
+        }
+    } catch (err) {
+        resultDiv.style.display = 'block';
+        resultDiv.className = 'test-result test-fail';
+        resultDiv.innerHTML = '<strong>Error:</strong> ' + err.message;
+    } finally {
+        btn.disabled = false;
+        btn.textContent = 'Save & Test';
+    }
+    return false;
+}
+
+async function testApi(apiName, btn) {
+    btn.disabled = true;
+    const origText = btn.textContent;
+    btn.textContent = 'Testing...';
+
+    try {
+        const resp = await fetch('/apis/' + apiName + '/test', {method: 'POST'});
+        const data = await resp.json();
+        const tests = (data.tests || []).map(t =>
+            (t.success ? '\u2705' : '\u274c') + ' ' + (t.name || '') + ': ' + (t.detail || t.error || '')
+        ).join('\n');
+        alert(data.success
+            ? 'Connection OK\n\n' + tests
+            : 'Test failed\n\n' + (tests || data.error || 'Unknown error'));
+    } catch (err) {
+        alert('Error: ' + err.message);
+    } finally {
+        btn.disabled = false;
+        btn.textContent = origText;
+    }
+}
+
+/* --- WhatsApp QR auth flow --- */
+let waAbortCtrl = null;
+let waSyncPollTimer = null;
+
+/**
+ * Parse Unicode block-art QR into a pixel matrix and draw on canvas.
+ * Characters encode two vertical pixels each:
+ *   █ (U+2588) = top black, bottom black
+ *   ▀ (U+2580) = top black, bottom white
+ *   ▄ (U+2584) = top white, bottom black
+ *   space      = top white, bottom white
+ */
+function renderQrCanvas(qrText) {
+    const canvas = document.getElementById('wa-qr');
+    const lines = qrText.split('\n').filter(l => l.length > 0);
+    if (lines.length === 0) return;
+
+    const width = Math.max(...lines.map(l => [...l].length));
+    const height = lines.length * 2;
+    // Build pixel grid (true = black)
+    const pixels = [];
+    for (let row = 0; row < lines.length; row++) {
+        const chars = [...lines[row]];
+        const topRow = [];
+        const botRow = [];
+        for (let col = 0; col < width; col++) {
+            const ch = col < chars.length ? chars[col] : ' ';
+            if (ch === '\u2588' || ch === '\u2589' || ch === '\u258A' || ch === '\u258B' ||
+                ch === '\u258C' || ch === '\u258D' || ch === '\u258E' || ch === '\u258F') {
+                topRow.push(true); botRow.push(true);       // full block
+            } else if (ch === '\u2580') {
+                topRow.push(true); botRow.push(false);      // upper half
+            } else if (ch === '\u2584') {
+                topRow.push(false); botRow.push(true);       // lower half
+            } else {
+                topRow.push(false); botRow.push(false);      // space / other
+            }
+        }
+        pixels.push(topRow, botRow);
+    }
+
+    const scale = 4;  // each module = 4x4 CSS pixels
+    canvas.width = width * scale;
+    canvas.height = pixels.length * scale;
+    canvas.style.width = (width * scale) + 'px';
+    canvas.style.height = (pixels.length * scale) + 'px';
+
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = '#000000';
+    for (let y = 0; y < pixels.length; y++) {
+        for (let x = 0; x < pixels[y].length; x++) {
+            if (pixels[y][x]) {
+                ctx.fillRect(x * scale, y * scale, scale, scale);
+            }
+        }
+    }
+    canvas.style.display = 'block';
+}
+
+function waLog(msg) {
+    const logEl = document.getElementById('wa-log');
+    const line = document.createElement('div');
+    line.textContent = msg;
+    logEl.appendChild(line);
+    logEl.scrollTop = logEl.scrollHeight;
+}
+
+/** Update the WhatsApp card badge and actions for syncing state. */
+function waSetCardSyncing() {
+    const badge = document.getElementById('wa-card-badge');
+    if (badge) {
+        badge.textContent = 'syncing...';
+        badge.className = 'badge badge-warning';
+    }
+    const actions = document.getElementById('wa-card-actions');
+    if (actions) {
+        actions.innerHTML = '<button class="btn btn-secondary btn-sm" disabled>Syncing...</button>' +
+            ' <button class="btn-icon" onclick="document.getElementById(\'help-whatsapp\').showModal()">?</button>';
+    }
+}
+
+/** Start polling sync status — reload page when sync completes. */
+function waStartSyncPolling() {
+    if (waSyncPollTimer) return;
+    waSyncPollTimer = setInterval(async () => {
+        try {
+            const resp = await fetch('/apis/whatsapp/sync-status');
+            const data = await resp.json();
+            if (data.status !== 'syncing') {
+                clearInterval(waSyncPollTimer);
+                waSyncPollTimer = null;
+                location.reload();
+            }
+        } catch (e) { /* ignore fetch errors */ }
+    }, 5000);
+}
+
+function startWhatsAppAuth() {
+    const logEl = document.getElementById('wa-log');
+    const qrEl = document.getElementById('wa-qr');
+    const resultEl = document.getElementById('wa-result');
+    const btn = document.getElementById('wa-start-btn');
+
+    btn.disabled = true;
+    btn.textContent = 'Connecting...';
+    logEl.innerHTML = '';
+    waLog('Connecting to WhatsApp...');
+    qrEl.style.display = 'none';
+    resultEl.style.display = 'none';
+
+    waAbortCtrl = new AbortController();
+
+    fetch('/apis/whatsapp/auth-stream', {signal: waAbortCtrl.signal})
+        .then(response => {
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = '';
+
+            function read() {
+                reader.read().then(({done, value}) => {
+                    if (done) return;
+                    buffer += decoder.decode(value, {stream: true});
+
+                    // Parse SSE events from the buffer
+                    const parts = buffer.split('\n\n');
+                    buffer = parts.pop(); // Keep incomplete part
+
+                    for (const part of parts) {
+                        let event = 'message', data = '';
+                        for (const line of part.split('\n')) {
+                            if (line.startsWith('event: ')) event = line.slice(7);
+                            else if (line.startsWith('data: ')) data = line.slice(6);
+                        }
+                        if (!data) continue;
+
+                        try {
+                            const parsed = JSON.parse(data);
+                            if (event === 'qr') {
+                                renderQrCanvas(parsed.qr);
+                                waLog('QR code ready - scan with WhatsApp (Linked Devices > Link a Device)');
+                                btn.textContent = 'Waiting for scan...';
+                            } else if (event === 'connected') {
+                                // Auth succeeded — entering sync phase
+                                qrEl.style.display = 'none';
+                                btn.textContent = 'Syncing...';
+                                waLog(parsed.message || 'Connected! Syncing conversations...');
+                                waSetCardSyncing();
+                                waStartSyncPolling();
+                            } else if (event === 'sync') {
+                                // Sync progress update
+                                waLog(parsed.message || '');
+                            } else if (event === 'status') {
+                                waLog(parsed.message || '');
+                            } else if (event === 'done') {
+                                qrEl.style.display = 'none';
+                                resultEl.style.display = 'block';
+                                if (parsed.success) {
+                                    waLog('Sync complete!');
+                                    resultEl.className = 'test-result test-ok';
+                                    resultEl.innerHTML = '<strong>WhatsApp connected and synced!</strong> Reloading...';
+                                    if (waSyncPollTimer) { clearInterval(waSyncPollTimer); waSyncPollTimer = null; }
+                                    setTimeout(() => location.reload(), 1500);
+                                } else {
+                                    waLog('Authentication did not complete.');
+                                    resultEl.className = 'test-result test-fail';
+                                    resultEl.innerHTML = '<strong>Authentication did not complete.</strong> Try again.';
+                                    btn.disabled = false;
+                                    btn.textContent = 'Start Authentication';
+                                }
+                            }
+                        } catch (e) { /* ignore parse errors */ }
+                    }
+                    read();
+                }).catch(() => {});
+            }
+            read();
+        })
+        .catch(err => {
+            if (err.name !== 'AbortError') {
+                waLog('Connection error: ' + err.message);
+            }
+            btn.disabled = false;
+            btn.textContent = 'Start Authentication';
+        });
+}
+
+function closeWhatsAppAuth() {
+    if (waAbortCtrl) { waAbortCtrl.abort(); waAbortCtrl = null; }
+    document.getElementById('modal-whatsapp').close();
+    // Reset modal state for next open
+    const btn = document.getElementById('wa-start-btn');
+    if (btn) { btn.disabled = false; btn.textContent = 'Start Authentication'; }
+    const logEl = document.getElementById('wa-log');
+    if (logEl) logEl.innerHTML = 'Click "Start Authentication" to begin.';
+    const qrEl = document.getElementById('wa-qr');
+    if (qrEl) qrEl.style.display = 'none';
+    const resultEl = document.getElementById('wa-result');
+    if (resultEl) resultEl.style.display = 'none';
+    // Don't stop sync polling — sync continues in the background
+}
+
+/* Start sync polling on page load if card shows syncing */
+(function() {
+    const badge = document.getElementById('wa-card-badge');
+    if (badge && badge.textContent.trim() === 'syncing...') {
+        waStartSyncPolling();
+    }
+})()
+
+/* --- Export / Import credentials --- */
+async function exportCredentials() {
+    try {
+        const resp = await fetch('/apis/export');
+        if (!resp.ok) { alert('Export failed'); return; }
+        const data = await resp.json();
+        const blob = new Blob([JSON.stringify(data, null, 2)], {type: 'application/json'});
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'nanos-credentials.json';
+        a.click();
+        URL.revokeObjectURL(url);
+    } catch (err) {
+        alert('Export error: ' + err.message);
+    }
+}
+
+async function importCredentials(input) {
+    const file = input.files[0];
+    if (!file) return;
+    input.value = '';
+
+    const password = prompt(
+        'Enter the password that was used when these credentials were exported.\n\n' +
+        'Leave blank if the export was made with the same master key as this system.'
+    );
+    if (password === null) return;  // user cancelled
+
+    const fd = new FormData();
+    fd.append('file', file);
+    if (password) fd.append('password', password);
+
+    try {
+        const resp = await fetch('/apis/import', {method: 'POST', body: fd});
+        const data = await resp.json();
+        if (data.success) {
+            alert('Imported ' + data.imported + ' credential(s).');
+            location.reload();
+        } else {
+            alert('Import failed: ' + (data.error || 'Unknown error'));
+        }
+    } catch (err) {
+        alert('Import error: ' + err.message);
+    }
+}
+</script>
+{% endblock %}

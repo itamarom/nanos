@@ -1,0 +1,144 @@
+version: "3.9"
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: nanos
+      POSTGRES_USER: nanos
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-change_me}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - nanos-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nanos"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    networks:
+      - nanos-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  api-gateway:
+    build:
+      context: .
+      dockerfile: gateway/Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://nanos:${DB_PASSWORD:-change_me}@db:5432/nanos
+      DATABASE_URL_SYNC: postgresql://nanos:${DB_PASSWORD:-change_me}@db:5432/nanos
+      REDIS_URL: redis://redis:6379/0
+      ADMIN_API_KEY: ${ADMIN_API_KEY:-admin_change_me}
+    volumes:
+      - ${NANOS_PATH:-./nanos}:/nanos
+      - wacli-store:/data/wacli-store
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - nanos-net
+      - nano-exec
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: dashboard/Dockerfile
+    ports:
+      - "8001:8001"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://nanos:${DB_PASSWORD:-change_me}@db:5432/nanos
+      GATEWAY_URL: http://api-gateway:8000
+      ADMIN_API_KEY: ${ADMIN_API_KEY:-admin_change_me}
+    volumes:
+      - ./.data/nano-logs:/var/log/nanos
+      - ${NANOS_PATH:-./nanos}:/nanos:ro
+    depends_on:
+      db:
+        condition: service_healthy
+      api-gateway:
+        condition: service_started
+    networks:
+      - nanos-net
+
+  worker:
+    build:
+      context: .
+      dockerfile: worker/Dockerfile
+    environment:
+      DATABASE_URL: postgresql+asyncpg://nanos:${DB_PASSWORD:-change_me}@db:5432/nanos
+      DATABASE_URL_SYNC: postgresql://nanos:${DB_PASSWORD:-change_me}@db:5432/nanos
+      REDIS_URL: redis://redis:6379/0
+      NANO_GATEWAY_URL: http://api-gateway:8000
+      NANO_RUNNER_IMAGE: nanos-nano-runner
+      NANO_EXEC_NETWORK: nano-exec
+      NANO_HOST_NANOS_PATH: ${NANO_HOST_NANOS_PATH:-./nanos}
+      NANO_HOST_LOGS_PATH: ${NANO_HOST_LOGS_PATH:-./.data/nano-logs}
+      PROJECT_ROOT: ${PWD}
+    volumes:
+      - ${NANOS_PATH:-./nanos}:/nanos:ro
+      - ./.data/nano-logs:/var/log/nanos
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      api-gateway:
+        condition: service_started
+      nano-runner:
+        condition: service_started
+    networks:
+      - nanos-net
+
+  beat:
+    build:
+      context: .
+      dockerfile: worker/Dockerfile
+    command: python -m celery -A celery_app beat --loglevel=info
+    working_dir: /app/worker
+    environment:
+      DATABASE_URL: postgresql+asyncpg://nanos:${DB_PASSWORD:-change_me}@db:5432/nanos
+      DATABASE_URL_SYNC: postgresql://nanos:${DB_PASSWORD:-change_me}@db:5432/nanos
+      REDIS_URL: redis://redis:6379/0
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - nanos-net
+
+  nano-runner:
+    build:
+      context: .
+      dockerfile: nano-runner/Dockerfile
+    image: nanos-nano-runner
+    entrypoint: ["echo", "image built"]
+
+volumes:
+  pgdata:
+    name: nanos-pgdata
+  wacli-store:
+    name: nanos-wacli-store
+
+networks:
+  nanos-net:
+    driver: bridge
+  nano-exec:
+    driver: bridge
+    name: nano-exec
